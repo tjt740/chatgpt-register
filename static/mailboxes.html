@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>邮箱管理 · ChatGPT 注册管理</title>
-<link rel="stylesheet" href="/static/style.css?v=15">
+<link rel="stylesheet" href="/static/style.css?v=16">
 </head>
 <body data-page="mailboxes">
 <div class="layout">
@@ -78,11 +78,14 @@
 <div class="modal-mask" id="import-modal" style="display:none">
   <div class="modal px-panel" style="width:620px">
     <h2>批量导入邮箱</h2>
-    <div class="import-sub">每行一个，重复 email 自动跳过，格式：</div>
+    <div class="import-sub">自动识别常见分隔格式、带表头 CSV/TSV、JSON 和多行键值。重复邮箱自动跳过。</div>
     <div class="import-formats">
       <code>someone@outlook.com----密码----client_id----refresh_token</code>
+      <code>someone@outlook.com|密码|refresh_token|client_id|附加信息</code>
     </div>
-    <textarea id="import-text" class="px-input import-textarea" rows="11" placeholder="在此粘贴内容，或直接把 txt 文件拖到这里 ..."></textarea>
+    <div class="import-sub import-help">支持 ----、---、竖线、Tab、逗号、分号、空格及「邮箱:密码」。第五段可为辅助邮箱或用户名等备注，无需是完整邮箱。仅密码格式可保存，收件认证仍需 client_id 和 refresh_token。</div>
+    <textarea id="import-text" class="px-input import-textarea" rows="11" placeholder="在此粘贴内容，或拖入 txt / csv / tsv / json 文件 ..."></textarea>
+    <div id="import-errors" class="import-sub import-help" role="status" hidden></div>
     <div class="modal-actions">
       <span id="import-count" class="import-count">已识别 0 个邮箱</span>
       <button class="px-btn" onclick="closeModal('import-modal')">取消</button>
@@ -113,6 +116,7 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js"></script>
-<script src="/static/mailboxes.js?v=9"></script>
+<script src="/static/mailbox-import.js?v=2"></script>
+<script src="/static/mailboxes.js?v=10"></script>
 </body>
 </html>

@@ -10,12 +10,15 @@ import (
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
 type Input struct {
-	Email     string
-	Password  string
-	FirstName string
-	LastName  string
-	Proxy     string
-	Headless  bool
+	Email       string
+	Password    string
+	FirstName   string
+	LastName    string
+	CountryCode string
+	BirthYear   int
+	BirthMonth  int // 1–12
+	Proxy       string
+	Headless    bool
 
 	// EgressCheck 为 true 时先打开 api.ipify.org 打印 Chromium 实际出口 IP（排障用）。
 	// 默认关闭，省去每次注册前的一次整页加载。
@@ -60,13 +63,27 @@ func Register(ctx context.Context, in Input) (*Result, error) {
 	if in.Password == "" {
 		in.Password = GenPassword(16)
 	}
+	FillProfileDefaults(&in)
+	return registerBrowser(ctx, in)
+}
+
+// FillProfileDefaults 在启动前补全资料；调用方可持久化结果以便重试复用。
+func FillProfileDefaults(in *Input) {
 	if in.FirstName == "" {
 		in.FirstName = firstNames[ri(len(firstNames))]
 	}
 	if in.LastName == "" {
 		in.LastName = lastNames[ri(len(lastNames))]
 	}
-	return registerBrowser(ctx, in)
+	if in.CountryCode == "" {
+		in.CountryCode = "SG"
+	}
+	if in.BirthYear == 0 {
+		in.BirthYear = GenBirthYear()
+	}
+	if in.BirthMonth == 0 {
+		in.BirthMonth = 1 + ri(12)
+	}
 }
 
 var firstNames = []string{"Alex", "Jamie", "Taylor", "Jordan", "Casey", "Morgan", "Riley", "Avery", "Quinn", "Parker", "Cameron", "Reese"}
@@ -102,7 +119,7 @@ func GenPassword(n int) string {
 	return string(b)
 }
 
-// GenBirthYear 返回一个成年（约 22~45 岁）出生年份，避免年龄限制。
+// GenBirthYear 按注册资料默认范围返回 1990–1999 年。
 func GenBirthYear() int {
-	return 1980 + ri(24) // 1980~2003
+	return 1990 + ri(10)
 }

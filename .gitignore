@@ -3,3 +3,7 @@ adskull-register
 adskull-register.exe
 backups/
 .ace-tool/
+.local/
+*.db-shm
+*.db-wal
+*.db-journal

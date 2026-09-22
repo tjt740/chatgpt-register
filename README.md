@@ -214,12 +214,17 @@ ADDR=8080 ./chatgpt-register.exe
 - **自动流程**：打开 `account.adobe.com` → 创建账号（邮箱 + 随机密码）→ 填姓名/生日/地区 → 提交 → 打开 Firefly 触发邮箱验证码页 → 自动读取邮箱池验证码并填入。
 - **验证码自动读取**：复用现有邮箱池（同 Grok 自动模式），按发件人/主题/正文特征筛出 Adobe 邮件并提取 6 位码，每条记录独立记录所用邮箱。
 - **批量生产 / 单个注册 / 停止 / 日志 / 失败截图 / 删除**：与 Grok 页面一致。
+- **手动重试**：待注册或注册失败且没有会话数据的记录，可点行内「重试」或勾选后「重试所选」。复用原记录、密码和历史日志；已注册或正在执行的记录不能重复注册。手动重试不受自动补任务的失败冷却限制。
+- **操作状态**：注册中可单条/批量停止，等待验证码时可手动输入；测活、导出仅对已注册且有会话的账号可用，救回仅对失效且有会话的账号可用。批量操作限定当前页所选记录，并显示失败原因与跳过数量。
 - **Cookie 导出（三选一，导出即出库）**：
   - **Cookie 字符串**：`k=v; k=v; ...`（单账号 `.txt`，多账号打包 `.zip`）
   - **Cookie JSON 对象**：单个 Adobe 的 Cookie 对象（含 `cookie_string` / `cookies_map` / 带元数据的 `cookies` / `storage`；单账号 `.json`，多账号 `.zip`）
   - **Cookie 数组（多 Adobe 批量）**：所选账号合并为单个 `.json` 数组
 - **安全**：列表接口不返回 `auth_data`（`json:"-"`），日志与截图不含验证码或 Cookie 明文；Cookie 仅通过上述导出接口、且仅对已注册记录开放。
-- **相关设置键**：`adobe_headless`（无头）；并发跟全局 `max_concurrency`，代理跟全局 `proxy_enabled` / `proxy_list`。
+- **浏览器模式**：页面提供“无头浏览器模式”开关，默认开启，保存后对新任务生效，重启后保留。
+- **失败重试与已有账号**：操作列使用文字按钮；失败记录可原地重新注册，保留密码、资料和历史日志。Adobe 提示邮箱已存在时显示“已注册”，在独立“信息”列说明已停止处理，不再登录、收码或采集会话；这类记录不会进入手动或自动重试。状态与错误原因/备注分别放在“状态”和“信息”列。
+- **注册资料**：出生年月默认随机取 1990–1999 年和 1–12 月，地区默认新加坡（SG）；资料写入记录，重试时复用。
+- **相关设置键**：`adobe_headless`（缺省/`1` 开启，`0` 关闭）、`adobe_first_name`、`adobe_last_name`、`adobe_country_code`（新记录的资料默认值）；并发跟全局 `max_concurrency`，代理跟全局 `proxy_enabled` / `proxy_list`。
 
 ---
 
@@ -230,11 +235,16 @@ ADDR=8080 ./chatgpt-register.exe
 进入「邮箱管理」，支持两种方式导入：
 
 - **手动添加**：填写邮箱地址、密码、服务商
-- **批量导入**：点击「批量导入邮箱」，每行一条，格式：
+- **批量导入**：点击「批量导入邮箱」，粘贴内容或拖入 TXT / CSV / TSV / JSON 文件。常见格式：
   ```
-  email----password----provider
+  email----password----client_id----refresh_token
+  email|password|refresh_token|client_id|recovery_email
   ```
-  `provider` 支持 `outlook` / `hotmail` / `gmail` 等
+  自动识别 `----`、`---`、Tab、竖线、中英文逗号/分号、空格及 `邮箱:密码`；通过 UUID 和令牌特征识别 `client_id` / `refresh_token` 的顺序。也支持带中英文表头的 CSV/TSV、JSON 对象/数组/JSONL、`email=... password=...` 单行键值和多行键值块。辅助邮箱、备注及多余字段会保存在备注中；无法识别的记录显示原因，重复邮箱自动跳过。
+
+  五段竖线格式的最后一段也可以是 `用户名@` 等不完整邮箱或附加信息，按备注保存。兼容聊天复制带来的邮箱 `\@` / `\_` 和 Microsoft 刷新令牌 `\_` 转义，密码保持原样。
+
+  `Graph API` 标识和 Outlook 竖线 OAuth 数据包会自动识别；显式要求 Graph 的记录必须包含 `client_id` 和 `refresh_token`。仅密码格式可导入保存，但当前收件认证仍需 OAuth 凭据。
 
 > Outlook 邮箱需额外填写 `client_id` 和 `refresh_token`。系统优先按 Microsoft Graph `.default` 刷新令牌；旧式令牌不接受该 scope（`AADSTS90023`）时自动按原授权刷新，并通过 Outlook IMAP XOAUTH2 收件，无需手动选择协议。
 

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"chatgpt-register/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type adobeStartInput struct {
@@ -27,10 +30,37 @@ type adobeCodeInput struct {
 	Code string `json:"code" binding:"required"`
 }
 
+func (h *Handler) AdobeBrowserSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"headless": h.AdobeProducer.Headless()})
+}
+
+func (h *Handler) AdobeBrowserSettingsSave(c *gin.Context) {
+	var in struct {
+		Headless *bool `json:"headless"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil || in.Headless == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "headless 必须为 true 或 false"})
+		return
+	}
+	value := "1"
+	if !*in.Headless {
+		value = "0"
+	}
+	setting := models.Setting{Key: "adobe_headless", Value: value}
+	if err := h.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"})}).Create(&setting).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存浏览器模式失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"headless": *in.Headless})
+}
+
 func (h *Handler) AdobeList(c *gin.Context) {
 	var regs []models.AdobeRegistration
 	q := h.DB.Order("updated_at desc, id desc")
-	if s := c.Query("status"); s != "" {
+	if s := c.Query("status"); s == "registered" {
+		// 已存在而结束处理的记录在界面同样显示为“已注册”。
+		q = q.Where("status IN ?", []string{"registered", "skipped"})
+	} else if s != "" {
 		q = q.Where("status = ?", s)
 	}
 	if kw := c.Query("q"); kw != "" {
@@ -54,11 +84,42 @@ func (h *Handler) AdobeList(c *gin.Context) {
 		return
 	}
 	// 列表不返回敏感数据：AuthData(json:"-") 与日志一律清空。
+	type listItem struct {
+		models.AdobeRegistration
+		HasAuth  bool `json:"has_auth"`
+		CanRetry bool `json:"can_retry"`
+	}
+	items := make([]listItem, 0, len(regs))
 	for i := range regs {
+		hasAuth := len(adobeLiveCookies(regs[i].AuthData)) > 0
+		canRetry := (regs[i].Status == "pending" || regs[i].Status == "register_failed") && strings.TrimSpace(regs[i].AuthData) == ""
 		regs[i].AuthData = ""
 		regs[i].Log = ""
+		items = append(items, listItem{AdobeRegistration: regs[i], HasAuth: hasAuth, CanRetry: canRetry})
 	}
-	c.JSON(http.StatusOK, gin.H{"data": regs, "total": total, "page": page, "size": size})
+	c.JSON(http.StatusOK, gin.H{"data": items, "total": total, "page": page, "size": size})
+}
+
+func (h *Handler) AdobeRetry(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 Adobe 账号 ID"})
+		return
+	}
+	if h.Browser == nil || !h.Browser.Ready() {
+		c.JSON(http.StatusConflict, gin.H{"error": "浏览器尚未就绪，请稍后重试"})
+		return
+	}
+	reg, err := h.AdobeProducer.Retry(uint(id))
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "id": reg.ID})
 }
 
 func (h *Handler) AdobeStart(c *gin.Context) {
@@ -123,8 +184,15 @@ func (h *Handler) AdobeSubmitCode(c *gin.Context) {
 }
 
 func (h *Handler) AdobeStop(c *gin.Context) {
-	id64, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	h.AdobeProducer.Stop(uint(id64))
+	id64, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil || id64 == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 Adobe 账号 ID"})
+		return
+	}
+	if !h.AdobeProducer.Stop(uint(id64)) {
+		c.JSON(http.StatusConflict, gin.H{"error": "该账号没有运行中的任务，请刷新查看状态"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -163,11 +231,7 @@ func (h *Handler) AdobeDelete(c *gin.Context) {
 }
 
 func (h *Handler) AdobeDeleteAll(c *gin.Context) {
-	var regs []models.AdobeRegistration
-	h.DB.Select("id").Where("status IN ?", []string{"registering", "waiting_code"}).Find(&regs)
-	for _, reg := range regs {
-		h.AdobeProducer.Stop(reg.ID)
-	}
+	h.AdobeProducer.StopAll()
 	r := h.DB.Where("1 = 1").Delete(&models.AdobeRegistration{})
 	if r.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": r.Error.Error()})
@@ -241,6 +305,13 @@ func (h *Handler) AdobeDownload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	usable := regs[:0]
+	for _, reg := range regs {
+		if len(adobeLiveCookies(reg.AuthData)) > 0 {
+			usable = append(usable, reg)
+		}
+	}
+	regs = usable
 	if len(regs) == 0 {
 		if in.UnshippedOnly {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "没有已注册未出库的 Adobe 账号"})
@@ -255,7 +326,10 @@ func (h *Handler) AdobeDownload(c *gin.Context) {
 		ids = append(ids, r.ID)
 	}
 	// 导出即出库。
-	h.DB.Model(&models.AdobeRegistration{}).Where("id IN ?", ids).Update("shipped", true)
+	if err := h.DB.Model(&models.AdobeRegistration{}).Where("id IN ?", ids).Update("shipped", true).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新出库状态失败"})
+		return
+	}
 
 	stamp := time.Now().UTC().Format("20060102_150405")
 	switch in.Format {

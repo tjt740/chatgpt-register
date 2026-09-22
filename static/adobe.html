@@ -5,6 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Adobe 注册 · ChatGPT 注册管理</title>
 <link rel="stylesheet" href="/static/style.css?v=17">
+<style>
+.adobe-info { min-width:200px; max-width:320px; font-size:12px; line-height:1.6; color:var(--text-3); white-space:pre-wrap; overflow-wrap:anywhere; }
+.adobe-status-cell { white-space:nowrap; }
+#adobe-batch { flex-wrap:wrap; }
+#adobe-batch-help { flex-basis:100%; color:var(--text-3); font-size:12px; line-height:1.6; }
+#adobe-action-result { margin:12px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+body[data-page="adobe"] .px-btn:disabled { opacity:.4; cursor:not-allowed; box-shadow:none; }
+body[data-page="adobe"] .badge { white-space:nowrap; }
+.adobe-row-actions { display:flex; flex-wrap:wrap; gap:6px; min-width:220px; max-width:300px; }
+.adobe-row-actions .px-btn { padding:5px 10px; font-size:12px; white-space:nowrap; }
+.adobe-browser-mode { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:16px; font-size:13px; }
+.adobe-browser-mode label { display:flex; gap:8px; align-items:center; cursor:pointer; }
+.adobe-browser-mode input { accent-color:var(--primary); }
+#adobe-mode-hint { color:var(--text-3); }
+  </style>
 </head>
 <body data-page="adobe">
 <div class="layout">
@@ -25,10 +40,15 @@
       </div>
     </div>
 
+    <div class="adobe-browser-mode">
+      <label><input id="adobe-headless" type="checkbox" role="switch" checked disabled onchange="saveAdobeBrowserMode()">无头浏览器模式</label>
+      <span id="adobe-mode-hint" role="status">默认开启，在后台运行；关闭后显示浏览器窗口。对新启动的任务生效。</span>
+    </div>
     <div class="toolbar">
       <input id="search" class="px-input search" placeholder="搜索 Adobe email / 备注 ...">
       <select id="filter-status" class="px-input">
         <option value="">全部状态</option>
+        <option value="pending">待注册</option>
         <option value="registering">注册中</option>
         <option value="waiting_code">等待验证码</option>
         <option value="registered">已注册</option>
@@ -54,20 +74,24 @@
 
     <div class="batch-bar" id="adobe-batch" style="display:none">
       <span id="adobe-batch-count">已选 0 项</span>
-      <button class="px-btn" onclick="downloadSelected('string')">导出 Cookie 字符串</button>
-      <button class="px-btn" onclick="downloadSelected('json')">导出 Cookie JSON</button>
-      <button class="px-btn" onclick="downloadSelected('array')">导出 Cookie 数组</button>
-      <button class="px-btn" onclick="liveCheckSelected()">测活所选</button>
-      <button class="px-btn" onclick="rescueSelected()">救回所选</button>
-      <button class="px-btn danger" onclick="delSelected()">删除所选</button>
+      <button class="px-btn primary" data-adobe-action="retry" onclick="retrySelected()">重试所选</button>
+      <button class="px-btn" data-adobe-action="stop" onclick="stopSelected()">停止所选</button>
+      <button class="px-btn" data-adobe-action="session" onclick="downloadSelected('string')">导出 Cookie 字符串</button>
+      <button class="px-btn" data-adobe-action="session" onclick="downloadSelected('json')">导出 Cookie JSON</button>
+      <button class="px-btn" data-adobe-action="session" onclick="downloadSelected('array')">导出 Cookie 数组</button>
+      <button class="px-btn" data-adobe-action="session" onclick="liveCheckSelected()">测活所选</button>
+      <button class="px-btn" data-adobe-action="rescue" onclick="rescueSelected()">救回所选</button>
+      <button class="px-btn danger" data-adobe-action="delete" onclick="delSelected()">删除所选</button>
       <button class="px-btn ghost" onclick="clearSelection()">取消</button>
+      <span id="adobe-batch-help"></span>
     </div>
+    <div id="adobe-action-result" role="status" hidden></div>
 
     <div class="table-wrap">
       <table class="px-table">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="adobe-check-all" onclick="toggleSelectAll(this.checked)"></th>
-          <th>邮箱</th><th>创建时间</th><th>状态</th><th>存活</th><th>出库状态</th><th>操作</th>
+          <th>邮箱</th><th>创建时间</th><th>状态</th><th>信息</th><th>存活</th><th>出库状态</th><th>操作</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -93,6 +117,18 @@
 </div>
 
 <!-- 日志 modal -->
+<div class="modal-mask" id="code-modal" style="display:none">
+  <div class="modal px-panel" style="width:420px">
+    <h2>输入 Adobe 邮箱验证码</h2>
+    <label for="adobe-code">邮箱收到的 6 位数字验证码</label>
+    <input id="adobe-code" class="px-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+    <div class="modal-actions">
+      <button class="px-btn" onclick="closeModal('code-modal')">取消</button>
+      <button class="px-btn primary" onclick="submitAdobeCode()">提交验证码</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-mask" id="log-modal" style="display:none">
   <div class="modal px-panel" style="width:640px">
     <h2 id="log-title">执行日志</h2>
@@ -119,6 +155,6 @@
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=4"></script>
-<script src="/static/adobe.js?v=3"></script>
+<script src="/static/adobe.js?v=7"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ package adobeproducer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -58,6 +59,11 @@ func New(db *gorm.DB, mail *mailfetch.Client) *Producer {
 	}
 }
 
+// Headless 默认开启；只有用户显式设置为 0 才显示浏览器窗口。
+func (p *Producer) Headless() bool {
+	return strings.TrimSpace(p.Setting("adobe_headless")) != "0"
+}
+
 func (p *Producer) Start(email, note string) (*models.AdobeRegistration, error) {
 	email = strings.TrimSpace(email)
 	if email == "" {
@@ -72,32 +78,27 @@ func (p *Producer) Start(email, note string) (*models.AdobeRegistration, error) 
 		}
 	}
 
-	var existing models.AdobeRegistration
-	if err := p.db.Where("email = ?", email).First(&existing).Error; err == nil {
-		if existing.Status == "registering" || existing.Status == "waiting_code" {
-			return nil, fmt.Errorf("该邮箱的 Adobe 注册正在进行中")
-		}
-		existing.Status = "registering"
-		existing.Note = note
-		existing.MailboxID = mailboxID
-		existing.Product = "firefly"
-		existing.Password = adobereg.GenPassword(16)
-		existing.AuthData = ""
-		existing.Shot = nil
-		existing.Shipped = false
-		if err := p.db.Save(&existing).Error; err != nil {
-			return nil, err
-		}
-		go p.run(existing.ID)
-		return &existing, nil
-	}
-
-	reg := models.AdobeRegistration{Email: email, MailboxID: mailboxID, Product: "firefly", Password: adobereg.GenPassword(16), Status: "registering", Note: note}
-	if err := p.db.Create(&reg).Error; err != nil {
+	reg, err := p.claimOne(email, mailboxID, note)
+	if err != nil {
 		return nil, err
 	}
-	go p.run(reg.ID)
-	return &reg, nil
+	p.launchRun(reg.ID)
+	return reg, nil
+}
+
+// Retry 只重试指定的失败/待注册记录，不覆盖已注册账号的凭据。
+// 手动重试由用户明确触发，不受自动补任务的失败冷却限制。
+func (p *Producer) Retry(id uint) (*models.AdobeRegistration, error) {
+	var existing models.AdobeRegistration
+	if err := p.db.First(&existing, id).Error; err != nil {
+		return nil, err
+	}
+	reg, err := p.claimOne(existing.Email, existing.MailboxID, "手动重新尝试注册")
+	if err != nil {
+		return nil, err
+	}
+	p.launchRun(reg.ID)
+	return reg, nil
 }
 
 // StartFromAccounts 从账号管理 / 邮箱管理取号开工，并在后台补任务：注册失败的邮箱
@@ -120,7 +121,7 @@ func (p *Producer) StartFromAccounts(count int) ([]models.AdobeRegistration, err
 	}
 	p.beginRun(count, started)
 	for _, reg := range started {
-		go p.run(reg.ID)
+		p.launchRun(reg.ID)
 	}
 	go p.topUp(count, started)
 	return started, nil
@@ -181,30 +182,79 @@ func (p *Producer) claimTargets(count int) ([]models.AdobeRegistration, bool, er
 	return started, p.hasCoolingFailure(cutoff), nil
 }
 
+// registrationProfile 补全并保留本条记录的姓名、生日和地区，重试不重新随机。
+func (p *Producer) registrationProfile(reg models.AdobeRegistration) adobereg.Input {
+	in := adobereg.Input{FirstName: reg.FirstName, LastName: reg.LastName, CountryCode: reg.CountryCode, BirthYear: reg.BirthYear, BirthMonth: reg.BirthMonth}
+	if in.FirstName == "" {
+		in.FirstName = p.Setting("adobe_first_name")
+	}
+	if in.LastName == "" {
+		in.LastName = p.Setting("adobe_last_name")
+	}
+	if in.CountryCode == "" {
+		in.CountryCode = p.Setting("adobe_country_code")
+	}
+	adobereg.FillProfileDefaults(&in)
+	return in
+}
+
 // claimOne 把一个邮箱置为 registering：已有记录就复用（重试同一条），否则新建。
 func (p *Producer) claimOne(email string, mailboxID uint, note string) (*models.AdobeRegistration, error) {
-	reg := models.AdobeRegistration{
-		Email:     email,
-		MailboxID: mailboxID,
-		Product:   "firefly",
-		Password:  adobereg.GenPassword(16),
-		Status:    "registering",
-		Note:      note,
-	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	var existing models.AdobeRegistration
-	if err := p.db.Where("email = ?", email).First(&existing).Error; err == nil {
-		existing.MailboxID = mailboxID
-		existing.Product = "firefly"
-		existing.Status = "registering"
-		existing.Shipped = false
-		existing.Password = reg.Password
-		existing.Note = note
-		existing.AuthData = ""
-		existing.Shot = nil
-		if err := p.db.Save(&existing).Error; err != nil {
+	err := p.db.Where("email = ?", email).First(&existing).Error
+	if err == nil {
+		if existing.Status == "skipped" {
+			return nil, fmt.Errorf("此邮箱已有 Adobe 账号，已跳过，不再执行注册或登录")
+		}
+		if _, running := p.cancel[existing.ID]; running {
+			return nil, fmt.Errorf("该账号有任务正在进行中，请等待结束后重试")
+		}
+		if existing.Status != "register_failed" && existing.Status != "pending" {
+			return nil, fmt.Errorf("仅待注册或注册失败的账号可重试，已注册账号请使用测活")
+		}
+		if strings.TrimSpace(existing.AuthData) != "" {
+			return nil, fmt.Errorf("该账号已有会话数据，请先检查日志和会话，不能重新注册覆盖")
+		}
+		password := existing.Password
+		if password == "" {
+			password = adobereg.GenPassword(16)
+		}
+		if mailboxID == 0 {
+			mailboxID = existing.MailboxID
+		}
+		profile := p.registrationProfile(existing)
+		updates := map[string]any{
+			"first_name": profile.FirstName, "last_name": profile.LastName, "country_code": profile.CountryCode,
+			"birth_year": profile.BirthYear, "birth_month": profile.BirthMonth,
+			"mailbox_id": mailboxID, "product": "firefly", "status": "registering",
+			"password": password, "note": note, "shipped": false, "shot": nil,
+			"alive": "", "alive_checked_at": nil,
+			"log": prodcore.AppendLogLine(existing.Log, "重新尝试 Adobe 注册（复用原记录）", maxLogBytes),
+		}
+		result := p.db.Model(&models.AdobeRegistration{}).
+			Where("id = ? AND status IN ?", existing.ID, []string{"register_failed", "pending"}).Updates(updates)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil, fmt.Errorf("账号状态已变化，请刷新后重试")
+		}
+		var claimed models.AdobeRegistration
+		if err := p.db.First(&claimed, existing.ID).Error; err != nil {
 			return nil, err
 		}
-		return &existing, nil
+		return &claimed, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	profile := p.registrationProfile(models.AdobeRegistration{})
+	reg := models.AdobeRegistration{
+		FirstName: profile.FirstName, LastName: profile.LastName, CountryCode: profile.CountryCode, BirthYear: profile.BirthYear, BirthMonth: profile.BirthMonth,
+		Email: email, MailboxID: mailboxID, Product: "firefly",
+		Password: adobereg.GenPassword(16), Status: "registering", Note: note,
 	}
 	if err := p.db.Create(&reg).Error; err != nil {
 		return nil, err
@@ -268,7 +318,7 @@ func (p *Producer) topUp(count int, started []models.AdobeRegistration) {
 		p.trackRun(regs)
 		tracked = p.trackedIDs()
 		for _, reg := range regs {
-			go p.run(reg.ID)
+			p.launchRun(reg.ID)
 		}
 	}
 }
@@ -341,8 +391,8 @@ func (p *Producer) countRegistered(ids []uint) int {
 
 func (p *Producer) SubmitCode(id uint, code string) error {
 	code = strings.TrimSpace(code)
-	if code == "" {
-		return fmt.Errorf("验证码不能为空")
+	if len(code) != 6 || digitCodeRe.FindString(code) != code {
+		return fmt.Errorf("验证码必须为 6 位数字")
 	}
 	p.mu.Lock()
 	ch := p.waiters[id]
@@ -359,13 +409,15 @@ func (p *Producer) SubmitCode(id uint, code string) error {
 	}
 }
 
-func (p *Producer) Stop(id uint) {
+func (p *Producer) Stop(id uint) bool {
 	p.mu.Lock()
 	cancel := p.cancel[id]
 	p.mu.Unlock()
 	if cancel != nil {
 		cancel()
+		return true
 	}
+	return false
 }
 
 // StopAll 请求停止所有在跑的 Adobe 注册任务，并停掉失败重试的补任务循环。
@@ -389,6 +441,7 @@ type Progress struct {
 	RunningNum int  `json:"running_num"`
 	Registered int  `json:"registered"`
 	Failed     int  `json:"failed"`
+	Skipped    int  `json:"skipped"`
 }
 
 func (p *Producer) Snapshot() Progress {
@@ -406,8 +459,9 @@ func (p *Producer) Snapshot() Progress {
 		Running:    runningNum > 0 || topUp,
 		Pending:    p.pendingRemaining(runningNum),
 		RunningNum: runningNum,
-		Registered: count("registered"),
+		Registered: count("registered", "skipped"),
 		Failed:     count("register_failed"),
+		Skipped:    count("skipped"),
 	}
 }
 
@@ -427,11 +481,19 @@ func (p *Producer) pendingRemaining(runningNum int) int {
 	return remaining
 }
 
-func (p *Producer) run(id uint) {
+// 在返回 HTTP 响应前登记任务，确保紧接着点击“停止”也能取消排队任务。
+func (p *Producer) launchRun(id uint) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
 	p.cancel[id] = cancel
 	p.mu.Unlock()
+	go func() {
+		defer cancel()
+		p.run(ctx, id)
+	}()
+}
+
+func (p *Producer) run(ctx context.Context, id uint) {
 	defer func() {
 		p.mu.Lock()
 		delete(p.waiters, id)
@@ -458,10 +520,11 @@ func (p *Producer) run(id uint) {
 	since := time.Now().Add(-30 * time.Second)
 
 	in := adobereg.Input{
+		FirstName: reg.FirstName, LastName: reg.LastName, CountryCode: reg.CountryCode, BirthYear: reg.BirthYear, BirthMonth: reg.BirthMonth,
 		Email:    reg.Email,
 		Password: reg.Password,
 		Proxy:    p.NextProxy(),
-		Headless: p.SettingOn("adobe_headless"),
+		Headless: p.Headless(),
 		// 出口 IP 探测默认关闭以提速；需排障时置 adobe_egress_check=1。
 		EgressCheck: p.SettingOn("adobe_egress_check"),
 		Captcha:     p.captchaSolver(id),
@@ -485,24 +548,34 @@ func (p *Producer) run(id uint) {
 
 	res, err := adobereg.Register(ctx, in)
 	if err != nil {
-		p.appendLog(id, "注册失败: "+err.Error())
-		p.db.Model(&models.AdobeRegistration{}).Where("id = ?", id).Updates(map[string]any{
-			"status": "register_failed",
-			"note":   prodcore.Truncate(err.Error(), 500),
-		})
+		p.finishRegistrationError(id, err)
 		return
 	}
 
 	authBytes, _ := json.MarshalIndent(res.AuthJSON, "", "  ")
+
 	p.appendLog(id, "Adobe 注册成功")
-	p.db.Model(&models.AdobeRegistration{}).Where("id = ?", id).Updates(map[string]any{
-		"status":    "registered",
-		"auth_data": string(authBytes),
-	})
+	if err := p.db.Model(&models.AdobeRegistration{}).Where("id = ?", id).Updates(map[string]any{
+		"status": "registered", "auth_data": string(authBytes), "note": "Adobe 注册成功",
+	}).Error; err != nil {
+		p.appendLog(id, "保存账号会话失败: "+err.Error())
+		return
+	}
 
 	// 注册成功后立即用与下游一致的 cookie→token 交换自检：若被 Adobe 卡在
 	// ride 身份核验（换不到 token），账号下游不可用，自动标记为失效（不删号）。
 	p.selfCheckAdobeAlive(id, string(authBytes))
+}
+
+// finishRegistrationError 将已存在邮箱作为终态跳过，避免失败重试循环再次登录该账号。
+func (p *Producer) finishRegistrationError(id uint, err error) {
+	status, note, line := "register_failed", prodcore.Truncate(err.Error(), 500), "注册失败: "+err.Error()
+	if errors.Is(err, adobereg.ErrAccountExists) {
+		status, note = "skipped", "此邮箱已有 Adobe 账号，已跳过；不执行登录、取码或会话操作"
+		line = note
+	}
+	p.appendLog(id, line)
+	p.db.Model(&models.AdobeRegistration{}).Where("id = ?", id).Updates(map[string]any{"status": status, "note": note})
 }
 
 // Rescue 对一个已注册但被 ride 卡住的号，异步还原会话并自动过掉身份核验。
@@ -577,7 +650,7 @@ func (p *Producer) runRescue(id uint) {
 	since := time.Now().Add(-15 * time.Second)
 	in := adobereg.Input{
 		Proxy:       p.NextProxy(),
-		Headless:    p.SettingOn("adobe_headless"),
+		Headless:    p.Headless(),
 		EgressCheck: p.SettingOn("adobe_egress_check"),
 		Log: func(f string, a ...any) {
 			p.appendLog(id, fmt.Sprintf(f, a...))

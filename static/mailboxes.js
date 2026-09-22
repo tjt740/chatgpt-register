@@ -151,13 +151,17 @@ async function deleteAllMailboxes() {
 /* ===== 批量导入 ===== */
 function openImportModal() {
   document.getElementById('import-text').value = '';
-  document.getElementById('import-count').textContent = '已识别 0 个邮箱';
+  updateImportCount();
   document.getElementById('import-modal').style.display = 'flex';
 }
 
 function updateImportCount() {
-  const n = parseImportLines(document.getElementById('import-text').value).length;
-  document.getElementById('import-count').textContent = '已识别 ' + n + ' 个邮箱';
+  const result = MailboxImport.parse(document.getElementById('import-text').value);
+  document.getElementById('import-count').textContent = '已识别 ' + result.items.length + ' 个邮箱' +
+    (result.errors.length ? '，未识别 ' + result.errors.length + ' 条' : '');
+  const errors = document.getElementById('import-errors');
+  errors.textContent = result.errors.slice(0, 3).map(error => '第 ' + error.entry + ' 条：' + error.message).join('；');
+  errors.hidden = !result.errors.length;
 }
 
 (function () {
@@ -177,26 +181,9 @@ function updateImportCount() {
   });
 })();
 
-function parseImportLines(text) {
-  const items = [];
-  text.split(/\r?\n/).forEach(line => {
-    line = line.trim();
-    if (!line) return;
-    const parts = line.split('----').map(p => p.trim());
-    if (parts.length !== 4 || !parts[0].includes('@')) return;
-    items.push({
-      email: parts[0],
-      password: parts[1],
-      client_id: parts[2],
-      refresh_token: parts[3],
-    });
-  });
-  return items;
-}
-
 async function doImport() {
   const text = document.getElementById('import-text').value;
-  const items = parseImportLines(text);
+  const { items, errors } = MailboxImport.parse(text);
   if (!items.length) return toast('没有可导入的有效行', true);
   const r = await api('/api/mailboxes/import', {
     method: 'POST',
@@ -206,10 +193,10 @@ async function doImport() {
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return toast('导入失败: ' + (d.error || r.status), true);
   closeModal('import-modal');
-  toast(`识别 ${items.length} 个：新增 ${d.added}，跳过 ${d.skipped}`);
+  toast(`识别 ${items.length} 个：新增 ${d.added}，跳过 ${d.skipped}` + (errors.length ? `，未识别 ${errors.length} 条` : '') +
+    (d.added > 0 ? `；已加入后台认证队列 ${d.queued || d.added} 个` : ''));
   mbPage = 1;
   loadMailboxes();
-  if (d.added > 0) toast(`已加入后台认证队列：${d.queued || d.added} 个`);
 }
 
 function openMailboxModal(data) {

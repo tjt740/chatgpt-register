@@ -117,6 +117,8 @@ func main() {
 		api.POST("/grok/registrations/:id/livecheck", h.GrokLiveCheckOne)
 
 		api.GET("/adobe/registrations", h.AdobeList)
+		api.GET("/adobe/browser-settings", h.AdobeBrowserSettings)
+		api.PUT("/adobe/browser-settings", h.AdobeBrowserSettingsSave)
 		api.DELETE("/adobe/registrations", h.AdobeDeleteAll)
 		api.POST("/adobe/registrations", h.AdobeStart)
 		api.POST("/adobe/produce", h.AdobeProduce)
@@ -124,6 +126,7 @@ func main() {
 		api.POST("/adobe/produce/stop", h.AdobeProduceStop)
 		api.POST("/adobe/registrations/:id/code", h.AdobeSubmitCode)
 		api.POST("/adobe/registrations/:id/stop", h.AdobeStop)
+		api.POST("/adobe/registrations/:id/retry", h.AdobeRetry)
 		api.POST("/adobe/registrations/:id/rescue", h.AdobeRescue)
 		api.POST("/adobe/registrations/rescue-dead", h.AdobeRescueDead)
 		api.DELETE("/adobe/registrations/:id", h.AdobeDelete)

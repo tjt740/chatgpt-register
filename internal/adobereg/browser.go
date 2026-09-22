@@ -17,7 +17,6 @@ import (
 	"chatgpt-register/internal/proxyutil"
 
 	"github.com/go-rod/rod"
-	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	launcherflags "github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
@@ -37,12 +36,10 @@ const (
 	stuckReloadAfter = 25 * time.Second
 )
 
-// launchAdobeBrowser 按注册用的一整套反爬/代理配置启动并连接 Adobe 专用 Chromium。
-// 返回的 browser 由调用方负责关闭；若返回了 bridge（认证代理桥），也要一并 Close；
-// cleanup 在浏览器关闭后调用，负责清理 launcher 的临时用户数据目录。
-func launchAdobeBrowser(in Input) (browser *rod.Browser, bridge *proxyutil.AuthBridge, cleanup func(), err error) {
+func newAdobeLauncher(headless bool) *launcher.Launcher {
 	// 与 grokreg 一致：删掉 rod 默认追加的一批自动化特征标志，降低被反爬识别的概率。
-	l := launcher.New()
+	// Rod 默认启用旧无头模式。必须同时处理 true 和 false，确保“可见”设置确实打开窗口。
+	l := launcher.New().HeadlessNew(headless)
 	for _, flag := range []string{
 		"no-startup-window",
 		"disable-features",
@@ -68,12 +65,7 @@ func launchAdobeBrowser(in Input) (browser *rod.Browser, bridge *proxyutil.AuthB
 	} {
 		l = l.Delete(launcherflags.Flag(flag))
 	}
-	if in.Headless {
-		// 与 grokreg 一致：Chrome 128 的 --headless 仍是旧无头，指纹差异大容易被拦，
-		// 必须显式 new headless。
-		l = l.Set("headless", "new")
-	}
-	l = l.
+	return l.
 		NoSandbox(true).
 		Set("no-default-browser-check").
 		Set("disable-suggestions-ui").
@@ -82,6 +74,13 @@ func launchAdobeBrowser(in Input) (browser *rod.Browser, bridge *proxyutil.AuthB
 		Set("disable-popup-blocking").
 		Set("hide-crash-restore-bubble").
 		Set("disable-features", "PrivacySandboxSettings4")
+}
+
+// launchAdobeBrowser 启动并连接 Adobe 专用 Chromium。
+// 返回的 browser 由调用方负责关闭；若返回了 bridge（认证代理桥），也要一并 Close；
+// cleanup 在浏览器关闭后调用，负责清理 launcher 的临时用户数据目录。
+func launchAdobeBrowser(in Input) (browser *rod.Browser, bridge *proxyutil.AuthBridge, cleanup func(), err error) {
+	l := newAdobeLauncher(in.Headless)
 	debugPort, perr := availableLoopbackPort()
 	if perr != nil {
 		return nil, nil, nil, fmt.Errorf("分配 Chrome 调试端口失败: %w", perr)
@@ -125,7 +124,7 @@ func launchAdobeBrowser(in Input) (browser *rod.Browser, bridge *proxyutil.AuthB
 		}
 		return nil, nil, nil, fmt.Errorf("连接 Chrome 失败: %w", cerr)
 	}
-	return browser, bridge, l.Cleanup, nil
+	return browser, bridge, func() { l.Kill(); l.Cleanup() }, nil
 }
 
 func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
@@ -145,7 +144,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 	}
 	defer func() {
 		// 关浏览器后清理 launcher 临时用户数据目录，避免残留 Profile 堆积
-		_ = rod.Try(browser.MustClose)
+		_ = browser.Timeout(5 * time.Second).Close()
 		cleanup()
 	}()
 
@@ -154,7 +153,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("Adobe 注册流程异常: %v", r)
 		}
-		if err == nil || page == nil || in.SaveShot == nil {
+		if err == nil || errors.Is(err, ErrAccountExists) || page == nil || in.SaveShot == nil {
 			return
 		}
 		func() {
@@ -163,7 +162,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 					in.logf("截图失败(panic): %v", r2)
 				}
 			}()
-			data, serr := page.Timeout(15*time.Second).Screenshot(false, nil)
+			data, serr := page.Context(context.Background()).Timeout(15*time.Second).Screenshot(false, nil)
 			if serr != nil || len(data) == 0 {
 				in.logf("截图失败: %v", serr)
 				return
@@ -184,7 +183,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 		_ = checkPage.Close()
 	}
 
-	page = browser.MustPage("")
+	page = browser.MustPage("").Context(ctx)
 	_ = (proto.EmulationSetDeviceMetricsOverride{
 		Width:             1280,
 		Height:            900,
@@ -209,7 +208,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 	if err = gotoStable(ctx, page, signInURL, in, 120*time.Second); err != nil {
 		return nil, err
 	}
-	in.logf("Adobe 登录页已加载")
+	in.logf("Adobe 入口已打开，等待登录/创建账号表单渲染")
 
 	if err = gotoCreateForm(ctx, page, in); err != nil {
 		return nil, err
@@ -217,7 +216,6 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 	if err = fillStep1(ctx, page, in); err != nil {
 		return nil, err
 	}
-	// 步骤顺序自适应：姓名/生日步与邮箱验证可能以任意顺序出现。
 	if err = completeSignup(ctx, page, in); err != nil {
 		return nil, err
 	}
@@ -226,7 +224,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 	// clio-playground-web 换 token 会被 ride_AdobeID_acct_evs 身份核验拦住。建号后
 	// 立刻用浏览器 cookie 探一次交换：命中核验就直接去核验页，省掉先打开 Firefly
 	// 白等一轮就绪超时。探测本身失败（网络等）则回退到采集会话后再探的老路径。
-	in.logf("账号创建完成，检查换 token 状态")
+	in.logf("账号创建完成，检查会话状态")
 	probed := false
 	if cookie := cookieHeaderFromPage(page); cookie != "" {
 		switch jump, perr := adobeRideJump(ctx, cookie); {
@@ -268,6 +266,7 @@ func registerBrowser(ctx context.Context, in Input) (res *Result, err error) {
 			auth = newAuth
 		}
 	}
+	auth["account_flow"] = "signup"
 	return &Result{AuthJSON: auth}, nil
 }
 
@@ -378,7 +377,7 @@ func RescueRide(ctx context.Context, in Input, cookies []map[string]any) (res *R
 	}
 	defer func() {
 		// 关浏览器后清理 launcher 临时用户数据目录，避免残留 Profile 堆积
-		_ = rod.Try(browser.MustClose)
+		_ = browser.Timeout(5 * time.Second).Close()
 		cleanup()
 	}()
 	defer func() {
@@ -524,6 +523,12 @@ func adobeRideJump(ctx context.Context, cookie string) (string, error) {
 // 报「target navigated or closed」，这里吞掉瞬时错误，轮询到 URL 稳定在
 // adobe 域后返回，避免误判为注册失败。
 func gotoStable(ctx context.Context, page *rod.Page, target string, in Input, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	page = page.Context(ctx)
 	_ = rod.Try(func() { page.Timeout(timeout).MustNavigate(target) })
 	deadline := time.Now().Add(timeout)
 	var last string
@@ -534,7 +539,7 @@ func gotoStable(ctx context.Context, page *rod.Page, target string, in Input, ti
 		}
 		_ = rod.Try(func() { page.Timeout(8 * time.Second).MustWaitLoad() })
 		u := pageURL(page)
-		if strings.Contains(u, "adobe.com") {
+		if isAdobeURL(u) {
 			if u == last {
 				if stable++; stable >= 1 {
 					return nil
@@ -557,26 +562,54 @@ func gotoStable(ctx context.Context, page *rod.Page, target string, in Input, ti
 // 登录页是 SPA，代理慢时偶发一直转圈、什么都不渲染；卡住就重新加载页面重试，
 // 而不是干等到超时判失败（同一个号第二次点生产往往就过，就是这个原因）。
 func gotoCreateForm(ctx context.Context, page *rod.Page, in Input) error {
-	deadline := time.Now().Add(90 * time.Second)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	page = page.Context(ctx)
 	nextReload := time.Now().Add(stuckReloadAfter)
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	for ctx.Err() == nil {
 		if hasSel(page, `input[name="username"]`) && hasSel(page, `input[name="password"]`) {
 			in.logf("已进入创建账号表单")
 			return nil
 		}
 		if time.Now().After(nextReload) {
-			in.logf("登录页仍未渲染出创建账号入口，重新加载后再试")
-			_ = gotoStable(ctx, page, signInURL, in, 45*time.Second)
+			in.logf("创建账号表单尚未就绪（%s），重新加载后再试", adobeEntryState(page))
+			if err := gotoStable(ctx, page, signInURL, in, 45*time.Second); err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				in.logf("重新加载 Adobe 入口失败: %v", err)
+			}
 			nextReload = time.Now().Add(stuckReloadAfter)
 			continue
 		}
-		clickByText(page, `a,span,button`, `create an account`)
-		time.Sleep(300 * time.Millisecond)
+		clickByLabels(page, `a,button,[role="link"],[role="button"]`,
+			"create an account", "create account", "创建帐户", "创建账户", "创建账号", "建立帳戶", "建立帳號")
+		select {
+		case <-ctx.Done():
+		case <-time.After(300 * time.Millisecond):
+		}
 	}
-	return fmt.Errorf("未能进入 Adobe 创建账号表单")
+	if parent.Err() != nil {
+		return parent.Err()
+	}
+	return fmt.Errorf("Adobe 登录/创建账号表单加载超时（%s）；请检查浏览器页面及网络/代理连接，查看失败截图", adobeEntryState(page.Context(parent)))
+}
+
+// 仅记录加载状态和可见控件数，不记录输入值、Cookie 或带认证参数的 URL。
+func adobeEntryState(page *rod.Page) string {
+	result, err := page.Timeout(2 * time.Second).Eval(`() => {
+		const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+		const inputs = [...document.querySelectorAll('input')].filter(visible).length;
+		return '站点=' + location.hostname + '，文档=' + document.readyState + '，可见输入框=' + inputs;
+	}`)
+	if err != nil {
+		return "页面状态暂不可读"
+	}
+	return result.Value.Str()
 }
 
 // fillStep1 填写邮箱+密码并提交第一步。整段最多重试 3 次：某次输入/提交
@@ -596,10 +629,15 @@ func fillStep1(ctx context.Context, page *rod.Page, in Input) error {
 				continue
 			}
 		}
+		in.logf("填写注册邮箱（第 %d 次尝试）", attempt+1)
 		if err := fillInput(ctx, page, `input[name="username"]`, in.Email, 45*time.Second); err != nil {
 			lastErr = fmt.Errorf("输入邮箱失败: %w", err)
 			continue
 		}
+		if err := adobeFormError(page); errors.Is(err, ErrAccountExists) {
+			return err
+		}
+		in.logf("填写注册密码")
 		if err := fillInput(ctx, page, `input[name="password"]`, in.Password, 30*time.Second); err != nil {
 			lastErr = fmt.Errorf("输入密码失败: %w", err)
 			continue
@@ -613,6 +651,9 @@ func fillStep1(ctx context.Context, page *rod.Page, in Input) error {
 		}
 		if err := submitAndAdvance(ctx, page, in, leftStep1, 60*time.Second); err != nil {
 			lastErr = fmt.Errorf("提交第一步失败: %w", err)
+			if errors.Is(err, ErrAccountExists) {
+				return err
+			}
 			if errors.Is(err, errCaptchaPuzzle) {
 				break // 图形验证是 IP 级风控，重新加载注册页也过不去
 			}
@@ -621,6 +662,33 @@ func fillStep1(ctx context.Context, page *rod.Page, in Input) error {
 		return nil
 	}
 	return lastErr
+}
+
+// ErrAccountExists 表示邮箱已有账号；上层应直接跳过，禁止继续登录或收码。
+var ErrAccountExists = errors.New("此邮箱已有 Adobe 账号")
+var errAdobePassword = errors.New("Adobe 登录密码不正确；请使用邮箱验证码登录或由账号所有者更新密码")
+
+func classifyAdobeFormError(text string) error {
+	text = strings.ToLower(text)
+	for _, phrase := range []string{"已经存在一个使用此电子邮件地址的帐户", "已经存在一个使用此电子邮件地址的账户", "an account with this email address already exists", "an account already exists with this email"} {
+		if strings.Contains(text, phrase) {
+			return ErrAccountExists
+		}
+	}
+	for _, phrase := range []string{"这是错误的密码", "incorrect password", "the password is incorrect"} {
+		if strings.Contains(text, phrase) {
+			return errAdobePassword
+		}
+	}
+	return nil
+}
+
+func adobeFormError(page *rod.Page) error {
+	result, err := page.Timeout(3 * time.Second).Eval(`() => (document.querySelector('main') || document.body).innerText`)
+	if err != nil {
+		return nil
+	}
+	return classifyAdobeFormError(result.Value.Str())
 }
 
 // completeSignup 在第一步之后自适应处理后续步骤：邮箱验证与姓名/生日步
@@ -632,7 +700,7 @@ func completeSignup(ctx context.Context, page *rod.Page, in Input) error {
 			return ctx.Err()
 		}
 		u := pageURL(page)
-		if onEmailVerify(page, u) {
+		if onEmailVerify(page, u) || needsEmailCodePrompt(page) {
 			if err := handleEmailVerification(ctx, page, in); err != nil {
 				return err
 			}
@@ -644,9 +712,9 @@ func completeSignup(ctx context.Context, page *rod.Page, in Input) error {
 			}
 			continue
 		}
-		if !strings.Contains(u, "signup") && !strings.Contains(u, "create-account") &&
-			!strings.Contains(u, "#/create") {
-			in.logf("注册表单已完成: %s", trimText(u, 120))
+		// 离开 signup 也可能回到了登录页，不能仅凭 URL 中没有 signup 就判成功。
+		if isAdobeAccountLanding(u) && !hasSel(page, `input[name="username"],input[name="password"]`) {
+			in.logf("注册表单已完成，已回到 Adobe 账号页面")
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -662,9 +730,9 @@ func fillStep2(ctx context.Context, page *rod.Page, in Input) error {
 		return fmt.Errorf("输入姓氏失败: %w", err)
 	}
 
-	month := ri(12)
-	year := GenBirthYear()
-	set, evErr := page.Eval(`(month, year) => {
+	month := in.BirthMonth - 1
+	year := in.BirthYear
+	set, evErr := page.Eval(`(month, year, country) => {
 		const setNative = (el, val) => {
 			if (!el) return;
 			const proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
@@ -678,9 +746,9 @@ func fillStep2(ctx context.Context, page *rod.Page, in Input) error {
 		const cc = document.querySelector('select[name="countryCode"]');
 		setNative(mo, String(month));
 		setNative(yr, String(year));
-		if (cc && cc.value !== 'US') setNative(cc, 'US');
+		if (cc && cc.value !== country) setNative(cc, country);
 		return JSON.stringify({ mo: mo && mo.value, yr: yr && yr.value, cc: cc && cc.value });
-	}`, month, year)
+	}`, month, year, in.CountryCode)
 	if evErr != nil {
 		return fmt.Errorf("填写生日/地区失败: %w", evErr)
 	}
@@ -793,11 +861,17 @@ func injectHCaptchaToken(page *rod.Page, token string) error {
 // 真正进入下一步；Adobe 的提交按钮在表单校验通过前为 disabled，且偶尔首次
 // 点击不生效，因此等按钮可点后点击，未推进则重试。
 func submitAndAdvance(ctx context.Context, page *rod.Page, in Input, advanced func() bool, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	page = page.Context(ctx)
 	deadline := time.Now().Add(timeout)
 	solves := 0
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err := adobeFormError(page); err != nil {
+			return err
 		}
 		if advanced() {
 			return nil
@@ -805,6 +879,12 @@ func submitAndAdvance(ctx context.Context, page *rod.Page, in Input, advanced fu
 		clickPrimary(page)
 		// 细粒度轮询：页面通常 1~2 秒内推进，1 秒一探会白等大半秒。
 		for i := 0; i < 24; i++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := adobeFormError(page); err != nil {
+				return err
+			}
 			if advanced() {
 				return nil
 			}
@@ -830,20 +910,33 @@ func submitAndAdvance(ctx context.Context, page *rod.Page, in Input, advanced fu
 
 // clickPrimary 点击表单主按钮：优先可点的 type=submit，否则按文本兜底。
 func clickPrimary(page *rod.Page) bool {
-	el, err := page.Timeout(10 * time.Second).Element(`button[type="submit"]:not([disabled])`)
-	if err == nil && el != nil {
-		if verr := el.WaitVisible(); verr == nil {
-			if mouseClickElement(el) {
-				return true
-			}
-			return el.Click(proto.InputMouseButtonLeft, 1) == nil
-		}
+	result, err := page.Timeout(5 * time.Second).Eval(`() => {
+  const el=[...document.querySelectorAll('button[type="submit"]')].find(el =>
+    !el.disabled && el.getAttribute('aria-disabled')!=='true' &&
+    !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  if (!el) return false;
+  el.click(); return true;
+ }`)
+	if err == nil && result.Value.Bool() {
+		return true
 	}
-	return clickByText(page, `button`, `continue`) || clickByText(page, `button`, `create account`)
+	return clickByLabels(page, `button,[role="button"]`, "continue", "create account", "create an account", "sign in", "继续", "繼續", "创建帐户", "创建账户", "创建账号", "建立帳戶", "登录", "登入")
 }
 
 // handleEmailVerification 处理 Adobe「验证您的身份」邮箱验证码页面（自动取码填入）。
 func handleEmailVerification(ctx context.Context, page *rod.Page, in Input) error {
+	if needsEmailCodePrompt(page) {
+		if in.ResetCodeBaseline != nil {
+			in.ResetCodeBaseline()
+		}
+		in.logf("确认发送身份验证邮件")
+		if !clickByLabels(page, `button,[role="button"]`, "continue", "继续", "繼續") {
+			return fmt.Errorf("未找到发送邮箱验证码的继续按钮")
+		}
+		if !waitCleared(ctx, page, 45*time.Second, func() bool { return onEmailVerify(page, pageURL(page)) }) {
+			return fmt.Errorf("已请求验证邮件，但验证码输入框未出现")
+		}
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -860,8 +953,9 @@ func handleEmailVerification(ctx context.Context, page *rod.Page, in Input) erro
 			return fmt.Errorf("填写验证码失败: %w", err)
 		}
 		// 6 位填满后 Adobe 自动提交；补按一次回车兜底。
-		if pin, perr := waitVisible(page, `input.PinInput-Input`, 10*time.Second); perr == nil {
-			_ = pin.Type(input.Enter)
+		if hasSel(page, `input.PinInput-Input`) {
+			_ = (proto.InputDispatchKeyEvent{Type: proto.InputDispatchKeyEventTypeKeyDown, Key: "Enter", Code: "Enter", WindowsVirtualKeyCode: 13}).Call(page.Timeout(2 * time.Second))
+			_ = (proto.InputDispatchKeyEvent{Type: proto.InputDispatchKeyEventTypeKeyUp, Key: "Enter", Code: "Enter", WindowsVirtualKeyCode: 13}).Call(page.Timeout(2 * time.Second))
 		}
 		if waitCleared(ctx, page, 40*time.Second, func() bool { return !onEmailVerify(page, pageURL(page)) }) {
 			in.logf("邮箱验证码校验通过")
@@ -869,7 +963,7 @@ func handleEmailVerification(ctx context.Context, page *rod.Page, in Input) erro
 		}
 		// 旧码已被消费或被拒，Adobe 不会自动再发；点「重新发送」让重试等的
 		// 是新邮件，否则会一直等到收码超时。
-		clickByText(page, `button,a,span`, `resend`)
+		clickByLabels(page, `button,a,[role="button"],[role="link"]`, "resend", "resend code", "重新发送", "重新傳送", "重新发送验证码", "重新发送代码")
 		in.logf("验证码提交后仍停留在验证页，已请求重发验证码后重试")
 	}
 	return fmt.Errorf("邮箱验证码校验未通过")
@@ -882,11 +976,13 @@ func waitFireflyReady(ctx context.Context, page *rod.Page, in Input, timeout tim
 			return ctx.Err()
 		}
 		u := pageURL(page)
-		if onEmailVerify(page, u) {
-			time.Sleep(1 * time.Second)
+		if onEmailVerify(page, u) || needsEmailCodePrompt(page) {
+			if err := handleEmailVerification(ctx, page, in); err != nil {
+				return err
+			}
 			continue
 		}
-		if strings.Contains(u, "firefly.adobe.com") || strings.Contains(u, "account.adobe.com") {
+		if isAdobeAccountLanding(u) && !hasSel(page, `input[name="username"],input[name="password"]`) {
 			in.logf("Firefly/Adobe 会话就绪: %s", trimText(u, 120))
 			return nil
 		}
@@ -942,11 +1038,54 @@ func captureAuth(page *rod.Page, in Input) (map[string]any, error) {
 /* ===== 通用小工具 ===== */
 
 func pageURL(page *rod.Page) string {
-	info, err := page.Info()
+	info, err := page.Timeout(3 * time.Second).Info()
 	if err != nil || info == nil {
 		return ""
 	}
 	return info.URL
+}
+
+func isAdobeURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "adobe.com" || strings.HasSuffix(host, ".adobe.com") || host == "adobelogin.com" || strings.HasSuffix(host, ".adobelogin.com")
+}
+
+func isAdobeAccountLanding(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "account.adobe.com" && host != "firefly.adobe.com" {
+		return false
+	}
+	route := strings.ToLower(u.Path + "#" + u.Fragment)
+	for _, part := range []string{"signup", "sign-in", "signin", "login", "create-account", "#/create", "email-verification"} {
+		if strings.Contains(route, part) {
+			return false
+		}
+	}
+	return true
+}
+
+// Adobe 有时先显示发送邮件确认页，按 Continue 后才渲染验证码输入框。
+func isEmailCodePromptText(text string) bool {
+	text = strings.Join(strings.Fields(strings.ToLower(strings.ReplaceAll(text, "’", "'"))), " ")
+	return strings.Contains(text, "we'll send you a verification code") ||
+		strings.Contains(text, "we will send you a verification code") ||
+		((strings.Contains(text, "我们将向") || strings.Contains(text, "我們將向")) &&
+			(strings.Contains(text, "验证码") || strings.Contains(text, "驗證碼") || strings.Contains(text, "代码")))
+}
+func needsEmailCodePrompt(page *rod.Page) bool {
+	if hasSel(page, `input.PinInput-Input`) {
+		return false
+	}
+	result, err := page.Timeout(3 * time.Second).Eval(`()=>(document.querySelector('main') || document.body).innerText`)
+	return err == nil && isEmailCodePromptText(result.Value.Str())
 }
 
 // onEmailVerify 判断当前是否停留在 Adobe 邮箱验证码页面。
@@ -958,54 +1097,36 @@ func onEmailVerify(page *rod.Page, u string) bool {
 }
 
 func hasSel(page *rod.Page, selector string) bool {
-	has, _, err := page.Has(selector)
-	if err != nil {
-		return false
-	}
-	return has
+	result, err := page.Timeout(3*time.Second).Eval(`selector => [...document.querySelectorAll(selector)].some(el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length))`, selector)
+	return err == nil && result.Value.Bool()
 }
 
-// fillInput 往输入框写入文本：优先逐字符人工输入（有真实按键节奏，降低被
-// Adobe 行为风控判为机器人、进而触发 ride 身份核验的概率），人工输入未生效
-// 时再退回原生 setter 兜底。每步都有独立超时并在总预算内重试。
+// fillInput 直接设置受控输入并触发 input/change，避免 Rod 的 ScrollIntoView
+// 在后台页面等待 root.requestAnimationFrame（其内部不继承元素超时）而无限挂起。
 func fillInput(ctx context.Context, page *rod.Page, selector, value string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	page = page.Context(ctx)
 	var lastErr error
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		lastErr = func() error {
-			// 先确认输入框已出现（有独立超时，不会拖到几分钟）。
-			el, err := waitVisible(page, selector, 12*time.Second)
-			if err != nil {
-				return err
-			}
-			// 优先逐字符人工输入（真实按键事件+节奏，最像真人）。
-			if err := typeHuman(el, value); err != nil {
-				return err
-			}
-			if inputValue(page, selector) == value {
+	for ctx.Err() == nil {
+		if hasSel(page, selector) {
+			lastErr = setInputValue(page, selector, value)
+			if lastErr == nil && inputValue(page, selector) == value {
 				return nil
 			}
-			// 人工输入未生效（React 重渲染替换了节点等），退回原生 setter 兜底。
-			if err := setInputValue(page, selector, value); err != nil {
-				return err
-			}
-			if got := inputValue(page, selector); got != value {
-				return fmt.Errorf("写入后内容不符(实际长度 %d)", len(got))
-			}
-			return nil
-		}()
-		if lastErr == nil {
-			return nil
 		}
-		time.Sleep(400 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("等待输入框超时")
+	if lastErr != nil {
+		return fmt.Errorf("填写表单失败: %v: %w", lastErr, ctx.Err())
 	}
-	return lastErr
+	return ctx.Err()
 }
 
 // setInputValue 聚焦输入框并用原生 setter 赋值、派发 input/change，兼容 React
@@ -1014,8 +1135,8 @@ func setInputValue(page *rod.Page, selector, value string) error {
 	ok, err := page.Timeout(10*time.Second).Eval(`(selector, value) => {
 		const els = [...document.querySelectorAll(selector)];
 		const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-		const el = els.find(visible) || els[0];
-		if (!el) return false;
+		const el = els.find(visible);
+		if (!el || el.disabled || el.readOnly) return false;
 		el.focus();
 		const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
 		setter.call(el, value);
@@ -1080,100 +1201,20 @@ func waitCleared(ctx context.Context, page *rod.Page, timeout time.Duration, cle
 	return cleared()
 }
 
-// clickByText 点击选择器命中的、可见且文本匹配（大小写不敏感）的第一个元素。
-func clickByText(page *rod.Page, selector, lowerText string) bool {
-	ok, err := page.Eval(`(selector, needle) => {
-		const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-		const el = [...document.querySelectorAll(selector)].find(e =>
-			visible(e) && (e.textContent || '').trim().toLowerCase().includes(needle));
+// clickByLabels 兼容本地化文案与 role=link/button 的 SPA 元素，避免点击包含文案的外层容器。
+func clickByLabels(page *rod.Page, selector string, labels ...string) bool {
+	result, err := page.Timeout(5*time.Second).Eval(`(selector, labels) => {
+		const norm = text => (text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+		const matches = new Set(labels.map(norm));
+		const el = [...document.querySelectorAll(selector)].find(el =>
+			(el.offsetWidth || el.offsetHeight || el.getClientRects().length) &&
+			!el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
+			(matches.has(norm(el.textContent)) || matches.has(norm(el.getAttribute('aria-label')))));
 		if (!el) return false;
 		el.click();
 		return true;
-	}`, selector, lowerText)
-	if err != nil {
-		return false
-	}
-	return ok.Value.Bool()
-}
-
-func typeHuman(el *rod.Element, text string) error {
-	if el == nil {
-		return fmt.Errorf("nil element")
-	}
-	_ = el.ScrollIntoView()
-	// 点击聚焦可能因浮层遮挡一直等「可交互」直到超时；限时尝试，失败改用 JS 聚焦
-	if err := rod.Try(func() { el.Timeout(5 * time.Second).MustClick() }); err != nil {
-		if _, ferr := el.Eval(`() => this.focus()`); ferr != nil {
-			return ferr
-		}
-	}
-	_ = el.SelectAllText()
-	_ = el.Input("")
-	for _, r := range text {
-		if err := el.Input(string(r)); err != nil {
-			return err
-		}
-		time.Sleep(25*time.Millisecond + time.Duration(ri(45))*time.Millisecond)
-	}
-	return nil
-}
-
-func mouseClickElement(el *rod.Element) bool {
-	if el == nil {
-		return false
-	}
-	_ = el.ScrollIntoView()
-	shape, err := el.Shape()
-	if err != nil || shape == nil {
-		return el.Click(proto.InputMouseButtonLeft, 1) == nil
-	}
-	pt := shape.OnePointInside()
-	if pt == nil {
-		if box := shape.Box(); box != nil {
-			return mouseClickAt(el.Page(), box.X+box.Width/2, box.Y+box.Height/2)
-		}
-		return el.Click(proto.InputMouseButtonLeft, 1) == nil
-	}
-	return mouseClickAt(el.Page(), pt.X, pt.Y)
-}
-
-func mouseClickAt(page *rod.Page, x, y float64) bool {
-	if x < 0 || y < 0 {
-		return false
-	}
-	mouse := page.Mouse
-	if err := mouse.MoveLinear(proto.NewPoint(x, y), 8+ri(8)); err != nil {
-		if err2 := mouse.MoveTo(proto.NewPoint(x, y)); err2 != nil {
-			return cdpClick(page, x, y)
-		}
-	}
-	time.Sleep(40*time.Millisecond + time.Duration(ri(90))*time.Millisecond)
-	if err := mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return cdpClick(page, x, y)
-	}
-	return true
-}
-
-func cdpClick(page *rod.Page, x, y float64) bool {
-	_ = (proto.InputDispatchMouseEvent{
-		Type: proto.InputDispatchMouseEventTypeMouseMoved,
-		X:    x, Y: y,
-	}).Call(page)
-	time.Sleep(30 * time.Millisecond)
-	_ = (proto.InputDispatchMouseEvent{
-		Type: proto.InputDispatchMouseEventTypeMousePressed,
-		X:    x, Y: y,
-		Button:     proto.InputMouseButtonLeft,
-		ClickCount: 1,
-	}).Call(page)
-	time.Sleep(40*time.Millisecond + time.Duration(ri(40))*time.Millisecond)
-	err := (proto.InputDispatchMouseEvent{
-		Type: proto.InputDispatchMouseEventTypeMouseReleased,
-		X:    x, Y: y,
-		Button:     proto.InputMouseButtonLeft,
-		ClickCount: 1,
-	}).Call(page)
-	return err == nil
+	}`, selector, labels)
+	return err == nil && result.Value.Bool()
 }
 
 // adobeChromiumBin 在 Adobe 专用 rod 目录（browser-adobe）管理 Chromium，

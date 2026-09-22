@@ -114,6 +114,7 @@ type mailboxImportItem struct {
 	Password     string `json:"password"`
 	ClientID     string `json:"client_id"`
 	RefreshToken string `json:"refresh_token"`
+	Note         string `json:"note"`
 }
 
 // MailboxImport 批量导入邮箱，重复 email 自动跳过。
@@ -146,6 +147,7 @@ func (h *Handler) MailboxImport(c *gin.Context) {
 			Password:     strings.TrimSpace(it.Password),
 			ClientID:     strings.TrimSpace(it.ClientID),
 			RefreshToken: strings.TrimSpace(it.RefreshToken),
+			Note:         strings.TrimSpace(it.Note),
 			Status:       "unverified",
 		}
 		if err := h.DB.Create(&m).Error; err != nil {

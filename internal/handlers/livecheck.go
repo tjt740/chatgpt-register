@@ -362,7 +362,10 @@ func grokRefreshCreds(authData string) (refresh, endpoint, clientID string) {
 
 func (h *Handler) AdobeLiveCheckStart(c *gin.Context) {
 	var in liveCheckReq
-	_ = c.ShouldBindJSON(&in)
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的测活请求"})
+		return
+	}
 	runner := h.liveRunnerFor("adobe")
 	if !runner.tryStart() {
 		c.JSON(http.StatusConflict, gin.H{"error": "已有测活任务进行中"})
@@ -425,31 +428,32 @@ func (h *Handler) applyAdobeAlive(id uint, st string) time.Time {
 
 func (h *Handler) loadAdobeItems(ids []uint) ([]livecheck.AdobeItem, error) {
 	var regs []models.AdobeRegistration
-	q := h.DB.Select("id", "auth_data").Where("auth_data <> ''")
+	q := h.DB.Select("id", "auth_data").Where("status = ? AND auth_data <> ''", "registered")
 	if len(ids) > 0 {
 		q = q.Where("id IN ?", ids)
-	} else {
-		q = q.Where("status = ?", "registered")
 	}
 	if err := q.Find(&regs).Error; err != nil {
 		return nil, err
 	}
 	items := make([]livecheck.AdobeItem, 0, len(regs))
 	for _, r := range regs {
-		items = append(items, livecheck.AdobeItem{ID: r.ID, Cookies: adobeLiveCookies(r.AuthData)})
+		if cookies := adobeLiveCookies(r.AuthData); len(cookies) > 0 {
+			items = append(items, livecheck.AdobeItem{ID: r.ID, Cookies: cookies})
+		}
 	}
 	return items, nil
 }
 
 func (h *Handler) loadAdobeItem(id uint) (livecheck.AdobeItem, bool) {
 	var r models.AdobeRegistration
-	if err := h.DB.Select("id", "auth_data").First(&r, id).Error; err != nil {
+	if err := h.DB.Select("id", "auth_data").Where("status = ?", "registered").First(&r, id).Error; err != nil {
 		return livecheck.AdobeItem{}, false
 	}
-	if r.AuthData == "" {
+	cookies := adobeLiveCookies(r.AuthData)
+	if len(cookies) == 0 {
 		return livecheck.AdobeItem{}, false
 	}
-	return livecheck.AdobeItem{ID: r.ID, Cookies: adobeLiveCookies(r.AuthData)}, true
+	return livecheck.AdobeItem{ID: r.ID, Cookies: cookies}, true
 }
 
 // adobeLiveCookies 把 AuthData 里的 Cookie 列表转成测活所需结构。
