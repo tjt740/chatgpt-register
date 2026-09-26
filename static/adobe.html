@@ -6,6 +6,17 @@
 <title>Adobe 注册 · ChatGPT 注册管理</title>
 <link rel="stylesheet" href="/static/style.css?v=17">
 <style>
+body[data-page="adobe"] .adobe-export-string { --export-color:#2563eb; }
+body[data-page="adobe"] .adobe-export-json { --export-color:#15803d; }
+body[data-page="adobe"] .adobe-export-array { --export-color:#b45309; }
+body[data-page="adobe"] .adobe-export-email { --export-color:#0e7490; }
+#adobe-batch .px-btn.adobe-export,
+body[data-page="adobe"] .px-btn.adobe-export {
+  background:var(--export-color); border-color:var(--export-color); color:#fff;
+}
+body[data-page="adobe"] .px-btn.adobe-export:hover:not(:disabled) { filter:brightness(1.1); color:#fff; }
+body[data-page="adobe"] .px-btn.adobe-export:focus-visible { outline:2px solid var(--export-color); outline-offset:3px; }
+body[data-page="adobe"] .px-select-opt.adobe-export { color:var(--export-color); }
 .adobe-info { min-width:200px; max-width:320px; font-size:12px; line-height:1.6; color:var(--text-3); white-space:pre-wrap; overflow-wrap:anywhere; }
 .adobe-status-cell { white-space:nowrap; }
 #adobe-batch { flex-wrap:wrap; }
@@ -61,9 +72,9 @@ body[data-page="adobe"] .badge { white-space:nowrap; }
           <svg class="px-select-arrow" viewBox="0 0 24 24"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
         </button>
         <div class="px-select-menu">
-          <button type="button" class="px-select-opt" onclick="downloadUnshipped('string')">Cookie 字符串</button>
-          <button type="button" class="px-select-opt" onclick="downloadUnshipped('json')">Cookie JSON</button>
-          <button type="button" class="px-select-opt" onclick="downloadUnshipped('array')">Cookie 数组</button>
+          <button type="button" class="px-select-opt adobe-export adobe-export-string" onclick="downloadUnshipped('string')">Cookie 字符串</button>
+          <button type="button" class="px-select-opt adobe-export adobe-export-json" onclick="downloadUnshipped('json')">Cookie JSON</button>
+          <button type="button" class="px-select-opt adobe-export adobe-export-array" onclick="downloadUnshipped('array')">Cookie 数组</button>
         </div>
       </div>
       <button class="px-btn" onclick="liveCheckAll()">测活</button>
@@ -76,9 +87,10 @@ body[data-page="adobe"] .badge { white-space:nowrap; }
       <span id="adobe-batch-count">已选 0 项</span>
       <button class="px-btn primary" data-adobe-action="retry" onclick="retrySelected()">重试所选</button>
       <button class="px-btn" data-adobe-action="stop" onclick="stopSelected()">停止所选</button>
-      <button class="px-btn" data-adobe-action="session" onclick="downloadSelected('string')">导出 Cookie 字符串</button>
-      <button class="px-btn" data-adobe-action="session" onclick="downloadSelected('json')">导出 Cookie JSON</button>
-      <button class="px-btn" data-adobe-action="session" onclick="downloadSelected('array')">导出 Cookie 数组</button>
+      <button class="px-btn adobe-export adobe-export-string" data-adobe-action="session" onclick="downloadSelected('string')">导出 Cookie 字符串</button>
+      <button class="px-btn adobe-export adobe-export-json" data-adobe-action="session" onclick="downloadSelected('json')">导出 Cookie JSON</button>
+      <button class="px-btn adobe-export adobe-export-array" data-adobe-action="session" onclick="downloadSelected('array')">导出 Cookie 数组</button>
+      <button class="px-btn adobe-export adobe-export-email" data-adobe-action="email" onclick="downloadSelectedEmails()">导出账号（仅邮箱）</button>
       <button class="px-btn" data-adobe-action="session" onclick="liveCheckSelected()">测活所选</button>
       <button class="px-btn" data-adobe-action="rescue" onclick="rescueSelected()">救回所选</button>
       <button class="px-btn danger" data-adobe-action="delete" onclick="delSelected()">删除所选</button>
@@ -155,6 +167,6 @@ body[data-page="adobe"] .badge { white-space:nowrap; }
 
 <div id="toast" class="toast" style="display:none"></div>
 <script src="/static/layout.js?v=4"></script>
-<script src="/static/adobe.js?v=7"></script>
+<script src="/static/adobe.js?v=8"></script>
 </body>
 </html>

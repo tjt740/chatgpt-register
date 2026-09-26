@@ -2,9 +2,7 @@ package main
 
 import (
 	"embed"
-	"io/fs"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,17 +167,9 @@ func main() {
 		api.POST("/lumina/download", h.LuminaDownload)
 	}
 
-	sub, err := fs.Sub(staticFS, "static")
-	if err != nil {
-		log.Fatalf("static fs: %v", err)
+	if err := registerStaticRoutes(r, staticFS, "."); err != nil {
+		log.Fatalf("static files: %v", err)
 	}
-	httpFS := http.FS(sub)
-	r.StaticFS("/static", httpFS)
-	for _, p := range []string{"login", "dashboard", "mailboxes", "accounts", "grok", "adobe", "leonardo", "lumina", "settings"} {
-		p := p
-		r.GET("/"+p, func(c *gin.Context) { c.FileFromFS(p+".html", httpFS) })
-	}
-	r.GET("/", func(c *gin.Context) { c.FileFromFS("dashboard.html", httpFS) })
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {

@@ -1,325 +1,217 @@
 # chatgpt-register
 
-> **ChatGPT 账号全自动批量注册管理台** · 纯协议注册（默认，不开浏览器） · 20 秒极速注册 · 一键裂变子号
+基于 Go 的账号与邮箱管理项目，提供本地 Web 管理界面，用于查看注册任务、管理邮箱、检查登录会话状态和导出账号数据。
 
----
+后端使用 Gin、GORM 和 SQLite；前端使用原生 HTML、CSS 和 JavaScript。部分任务通过 go-rod 驱动浏览器执行。
 
-🌐 **生图站** [vividai.run](https://vividai.run) &nbsp;|&nbsp;
-👥 **QQ 交流群** [1106849765](https://qm.qq.com/q/1106849765) &nbsp;|&nbsp;
-🐧 **QQ** 1114639355 &nbsp;|&nbsp;
-🛒 **小店** [pay.ldxp.cn/shop/chiyi](https://pay.ldxp.cn/shop/chiyi) &nbsp;|&nbsp;
-✉️ **邮箱** [vividairun@gmail.com](mailto:vividairun@gmail.com)
+## 功能
 
----
+| 模块 | 说明 |
+| --- | --- |
+| 仪表盘 | 查看任务进度、成功与失败数量、浏览器准备状态 |
+| 邮箱管理 | 导入、查询、认证邮箱，查看邮件与验证码 |
+| GPT 注册 | 管理任务、查看日志和截图、测活、导出会话数据 |
+| Adobe 注册 | 管理任务、重试、停止、测活、恢复会话与分类导出 |
+| Grok、Leonardo、Lumina | 各自独立的任务与账号管理页面 |
+| 系统设置 | 配置任务参数、浏览器、代理和管理员密码 |
 
-## ✨ 核心优势
+各模块支持的具体操作以对应页面为准。
 
-| 🚀 20 秒极速注册 | ✅ 全自动零干预 | 🔁 母号裂变子号 |
-|:---:|:---:|:---:|
-| 纯协议直连 `auth.openai.com`（Chrome 146 TLS 指纹），默认不开浏览器；风控时一键切回浏览器引擎 | 验证码自动从邮箱读取，全流程零手动操作 | 每个邮箱注册 1 个母号 + N 个别名子号，账号数量指数级增长 |
+## 运行环境
 
-| 🌐 代理池轮转 | 📊 可视化管理台 | 📦 零依赖部署 |
-|:---:|:---:|:---:|
-| 内置代理池按账号轮转，多 IP 并发注册不封号 | 毛玻璃风格 UI，实时仪表盘 + 执行日志可视化 | 纯 Go 编译单文件，无需安装任何环境，下载即用 |
+- 从源码运行或编译：Go 1.25.0 或更高版本。
+- 运行前端检查脚本：支持 `node --test` 的 Node.js。
+- 浏览器任务：需要可用的浏览器环境；程序启动时会在后台检查所需 Chromium，缺失时尝试下载。
+- SQLite 数据库由程序初始化，不需要单独部署数据库服务。
 
----
+## 启动
 
-## 🤖 纯协议注册——技术亮点
+以下命令均在包含 `go.mod` 的项目目录中执行。
 
-> 默认引擎为**纯协议注册**：用 Chrome 146 的 TLS/HTTP2 指纹（bogdanfinn tls-client）直连 `chatgpt.com` / `auth.openai.com`，不发 Sentinel 头、不启动浏览器，单号约 15~20 秒；出口 IP 归属地决定语言/时区，Cookie 会话与 access token 完整保存。
->
-> 若 OpenAI 收紧风控（例如开始强制 Sentinel 头），设置项 `chatgpt_engine=browser` 一键切回浏览器引擎：基于 **go-rod** 驱动本机真实 Chrome（new headless），真实 UA + Client Hints、随机屏幕规格、逐键输入和轨迹点击（`isTrusted=true`）。
-
-### 注册全流程（全自动，无需人工）
-
-```
-查出口 IP 归属地 → 按地区决定语言 / 时区
-    ↓
-[默认·纯协议] Chrome 146 TLS 指纹直连 chatgpt.com → 取 CSRF → authorize（自动发出邮箱验证码）
-[可切换·浏览器] 启动本机 Chrome（new headless，去自动化参数，随机屏幕规格，真实 UA + Client Hints）→ 打开注册页逐键输入邮箱
-    ↓
-实时监听邮箱，自动读取 6 位验证码并提交（最长等待 3 分钟，协议引擎自动重发一次）
-    ↓
-补全资料（姓名/生日）→ 回调换取会话 → 取 accessToken
-    ↓
-保存登录 Cookie 与 accessToken，并记录注册 UA / 出口 IP / 地区 / 代理（不注册 Agent Identity）
-    ↓
-导出 ChatGPT 账号凭据 JSON
-    ↓
-写入数据库，账号状态更新为「已注册」
-```
-
-### 关键技术点
-
-| 特性 | 说明 |
-|------|------|
-| **纯协议引擎（默认）** | `internal/codexreg/protocol.go`：bogdanfinn tls-client 以 Chrome 146 TLS/HTTP2 指纹直连，完成 CSRF→authorize→邮箱 OTP→create_account→callback→session 全链路；无浏览器、无 Sentinel 头，单号约 15~20 秒。CF 若返回 `cf-mitigated: challenge` 会映射为 IP 风控错误，自动换 IP 重试 |
-| **浏览器引擎（回退）** | 设置 `chatgpt_engine=browser` 切回 rod + 真实 Chrome + 共享进程池路径，支持注册后预热对话；OpenAI 若开始强制 Sentinel 头时切此模式 |
-| **真人交互**（浏览器引擎） | 键盘逐键 keydown/keyup（Shift 字符带修饰键）、鼠标带轨迹移动后再点击（`isTrusted=true`）、步骤间随机停顿；不用 `insertText` 和 `element.click()` |
-| **屏幕随机化** | 每次注册随机一套常见桌面分辨率，并还原"屏幕 > 窗口 > 视口"的层次，账号之间不共用同一屏幕指纹 |
-| **注册后预热**（浏览器引擎） | 注册成功先在同一浏览器、同一出口 IP 里发一条普通问题并等回复；开启时预热是成功关卡，不能完成网页对话的账号不会进入可用库存 |
-| **网页会话持久化** | 保存 ChatGPT/OpenAI 域的完整 Cookie（含 domain/path/httpOnly/secure/expiry），可导出并恢复真正的 `chatgpt.com` 登录会话；access token 仅作为会话派生凭据保存 |
-| **验证码自动读取** | 直接对接邮箱 API（Outlook/Gmail），每 5 秒轮询一次，无需人工复制粘贴 |
-| **GeoIP 自动对齐** | 注册前检测代理 IP 归属地，自动设置匹配的语言 / 时区 / 坐标；注册 UA、出口 IP、地区、代理写入 `auth_data`，下游用号时可沿用 |
-| **测活不串号** | 测活为每个账号单独一个浏览器上下文、单独走代理出口，恢复该账号 Cookie 后验证 `/api/auth/session`；不再把 token 塞进无 Cookie 的新浏览器请求 `/backend-api/me` 造成 401 误判 |
-| **共享进程池**（浏览器引擎） | 多个账号共用一个 Chrome 进程、各自独立 BrowserContext（cookie / 代理出口 / 窗口尺寸 / 屏幕 / 语言互相隔离），每号省 150~300MB 内存与 1~3 秒启动，上下文分配约 2ms；进程按时长 / 累计账号数自动退役重启 |
-| **IP 拦截识别** | Cloudflare 整页人机验证、提交邮箱后服务端无响应都识别为「出口 IP 被拦」，自动换住宅 IP 重试，不再当成邮箱失败白等 60 秒进冷却 |
-| **浏览器选择** | 默认优先本机安装的 Chrome/Edge（最新版、真实品牌）；没有则回退到自动下载的 Chromium |
-| **无头模式** | 生产环境开启无头模式，无需显示器，支持服务器 / VPS 部署 |
-| **截图存证** | 注册每个关键步骤自动截图，失败时可直接在管理台查看现场图，快速定位问题 |
-| **并发安全** | 多个注册任务并发执行，每个任务独立浏览器上下文，互不干扰 |
-
----
-
-## 截图预览
-
-| 仪表盘 | GPT 注册 |
-|:---:|:---:|
-| ![仪表盘](./screenshots/dashboard.png) | ![GPT 注册](./screenshots/accounts.png) |
-
-| 执行日志 | 邮箱管理 |
-|:---:|:---:|
-| ![执行日志](./screenshots/accounts-log.png) | ![邮箱管理](./screenshots/mailboxes.png) |
-
-| 邮件取件（自动读取验证码） |
-|:---:|
-| ![邮件取件](./screenshots/mailboxes-mail.png) |
-
----
-
-## 🏗️ 项目架构
-
-```
-chatgpt-register/
-├── main.go                  # 入口：Gin 路由注册 + 静态文件嵌入
-├── internal/
-│   ├── auth/                # JWT 鉴权服务（单 token、自动续期、落库）
-│   ├── browserboot/         # Rod 浏览器生命周期管理（启动时自动下载 Chromium）
-│   ├── codexreg/            # ChatGPT 注册核心逻辑（纯协议 + 浏览器双引擎）
-│   │   ├── protocol.go      # 纯协议注册（Chrome TLS 指纹直连 auth.openai.com，默认）
-│   │   ├── browser.go       # 浏览器注册流程（回退引擎，rod + 真实 Chrome）
-│   │   ├── codex.go         # accessToken 元数据解析
-│   │   ├── geoip.go         # IP 归属地检测（代理验证）
-│   │   └── codexreg.go      # 注册任务入口（按 chatgpt_engine 分发引擎）
-│   ├── adobereg/            # Adobe(Firefly) 注册核心逻辑（独立浏览器自动化）
-│   ├── adobeproducer/       # Adobe 批量注册调度器（复用邮箱池自动取码）
-│   ├── db/                  # SQLite 数据库初始化（纯 Go 驱动，无需 CGO）
-│   ├── emailalias/          # 邮箱别名生成（裂变子号）
-│   ├── handlers/            # HTTP 接口层（Gin Handler）
-│   │   ├── auth.go          # 登录 / 改密接口
-│   │   ├── registration.go  # 账户 CRUD + 日志 + 截图接口
-│   │   ├── adobe.go         # Adobe 注册 CRUD + 生产 + 三种 Cookie 导出
-│   │   ├── produce.go       # 批量生产控制（启动 / 状态 / 停止）
-│   │   ├── mailbox.go       # 邮箱 CRUD + 取件接口
-│   │   ├── proxy.go         # 代理测试接口
-│   │   └── settings.go      # 系统设置接口
-│   ├── mailfetch/           # 邮件取件（自动读取验证码）
-│   ├── models/              # GORM 数据模型（Admin / Registration / GrokRegistration / AdobeRegistration / Mailbox / Setting）
-│   └── producer/            # 批量注册调度器（并发控制 + 裂变策略）
-└── static/                  # 前端静态页面（嵌入二进制，无需 Web 服务器）
-    ├── dashboard.html        # 仪表盘
-    ├── accounts.html/js      # GPT 注册
-    ├── mailboxes.html/js     # 邮箱管理
-    ├── settings.html         # 系统设置
-    ├── adobe.html/js         # Adobe(Firefly) 注册管理
-    ├── login.html            # 登录页
-    ├── layout.js             # 公共布局 / 侧边栏
-    └── style.css             # 毛玻璃主题 CSS（35KB 精心打磨）
-```
-
-**技术栈：** Go · Gin · GORM · SQLite（纯 Go 驱动）· go-rod · rod/stealth · JWT · 原生 H5
-
----
-
-## 🚀 快速开始
-
-### 方式一：直接运行（推荐）
-
-下载 Release 中对应系统的可执行文件，双击运行或：
+### 从源码运行
 
 ```bash
-# Windows
-./chatgpt-register.exe
-
-# Linux
-./chatgpt-register-linux
-```
-
-浏览器打开 [http://localhost:9000](http://localhost:9000)
-
-### 方式二：源码运行
-
-```bash
-git clone https://github.com/yourname/chatgpt-register
-cd chatgpt-register
 go run .
 ```
 
-### 方式三：自行编译
+启动后访问 [http://localhost:9000](http://localhost:9000)。
+
+### 编译后运行
+
+macOS / Linux：
 
 ```bash
-# Windows
+mkdir -p .local
+go build -o .local/chatgpt-register .
+./.local/chatgpt-register
+```
+
+Windows PowerShell：
+
+```powershell
 go build -o chatgpt-register.exe .
-
-# Linux
-GOOS=linux go build -o chatgpt-register-linux .
+.\chatgpt-register.exe
 ```
 
-### 自定义端口
+已编译的可执行文件必须与运行机器的系统和 CPU 架构匹配。
+
+### 设置监听地址
+
+`ADDR` 支持端口号或完整的监听地址，默认值为 `:9000`。
+
+macOS / Linux：
 
 ```bash
-ADDR=8080 ./chatgpt-register.exe
+ADDR=8080 go run .
 ```
 
-> 数据保存在同目录 `adskull.db`，已加入 `.gitignore`，请勿提交。
+仅监听本机地址：
 
----
+```bash
+ADDR=127.0.0.1:9000 go run .
+```
 
-## 🔐 登录
+Windows PowerShell：
 
-- 默认账号：`admin` / `admin123`
-- 首次登录后请立即在「系统设置」修改密码（密码长度 > 6 位）
+```powershell
+$env:ADDR = "127.0.0.1:9000"
+.\chatgpt-register.exe
+```
 
-**JWT 安全机制：**
-- Token 有效期 **24 小时**，签发超过 2 小时自动续期（响应头 `X-New-Token` 下发）
-- Token 全局唯一：重新登录 / 改密 / 续期均会使旧 Token 立即失效
-- Token 落库持久化，进程重启后无需重新登录
+### 管理员登录
 
----
+首次初始化数据库、尚无管理员时，程序创建默认账号：
 
-## 📋 功能说明
+- 用户名：`admin`
+- 密码：`admin123`
 
-### 批量生产（核心功能）
+可在“系统设置”修改密码。已有数据库中的管理员密码不会因重启而重置。
 
-1. 在「邮箱管理」导入邮箱（支持批量 CSV 导入）
-2. 在「系统设置」配置并发数、裂变数量、代理池
-3. 在「仪表盘」点击「生产」，设置目标数量，一键启动
-4. 实时查看进度、成功率、执行日志和注册截图
+## 本地开发与热更新
 
-**裂变策略：** 每个邮箱先注册母号（用邮箱本身地址），母号成功后用 plus addressing 别名（`email+001@…`）注册裂变子号，每个邮箱最多 `1 + 裂变数量` 个账号。注册失败自动补单直到达标。
+启动时，如果当前工作目录同时存在 `go.mod` 和 `static/`，程序会启用前端热更新：
+
+- 直接读取本地 HTML、CSS 和 JavaScript 文件。
+- 页面约每 1.5 秒检查一次文件版本，检测到变化后自动刷新。
+- 修改前端文件无需重新编译或重启后端。
+- 修改 Go 代码仍需要重新编译并重启。
+
+升级旧版本以启用热更新功能时，需要先重启一次服务，并刷新已打开的旧页面。
+
+如需使用编译时内嵌的页面，可设置：
+
+```bash
+STATIC_MODE=embedded go run .
+```
+
+单独运行可执行文件，且工作目录不满足上述源码目录条件时，也会使用内嵌页面。内嵌模式下修改前端文件，需要重新编译、重启并刷新页面。
+
+## 使用说明
 
 ### 邮箱管理
 
-- 状态四态：`待验证 / 验证中 / 验证失败 / 已验证`
-- 导入后由服务端 10 并发后台认证；关闭页面或重启服务后会自动继续
-- 支持重新认证所选邮箱、仅认证失败邮箱或全部邮箱，无效凭据立即失败，临时网络错误自动重试
-- 邮箱管理、GPT 注册和仪表盘列表均提供带二次确认的“全部删除”操作
-- 「取件」弹窗：3 秒轮询实时收件，sandbox iframe 隔离展示邮件内容
-- 支持 Outlook（需填 `client_id` + `refresh_token`）：自动识别 OAuth 权限并选择 Microsoft Graph 或 Outlook IMAP XOAUTH2，兼容两类刷新令牌
+在“邮箱管理”添加或批量导入邮箱，然后查看认证状态。Outlook 收件支持 Microsoft Graph 和 IMAP OAuth，需提供相应的 `client_id` 与 `refresh_token`。
 
-### Adobe 注册（Firefly 免费生图/生视频，独立模块）
+导入支持 TXT、CSV、TSV、JSON 等格式。常见文本格式为：
 
-与 ChatGPT / Grok 注册完全分开，独立页面「Adobe 注册」、独立数据表 `adobe_registrations`、独立路由 `/api/adobe/*`，注册目标为 Adobe 账号（免费即可用 Firefly 免费额度）。
-
-- **自动流程**：打开 `account.adobe.com` → 创建账号（邮箱 + 随机密码）→ 填姓名/生日/地区 → 提交 → 打开 Firefly 触发邮箱验证码页 → 自动读取邮箱池验证码并填入。
-- **验证码自动读取**：复用现有邮箱池（同 Grok 自动模式），按发件人/主题/正文特征筛出 Adobe 邮件并提取 6 位码，每条记录独立记录所用邮箱。
-- **批量生产 / 单个注册 / 停止 / 日志 / 失败截图 / 删除**：与 Grok 页面一致。
-- **手动重试**：待注册或注册失败且没有会话数据的记录，可点行内「重试」或勾选后「重试所选」。复用原记录、密码和历史日志；已注册或正在执行的记录不能重复注册。手动重试不受自动补任务的失败冷却限制。
-- **操作状态**：注册中可单条/批量停止，等待验证码时可手动输入；测活、导出仅对已注册且有会话的账号可用，救回仅对失效且有会话的账号可用。批量操作限定当前页所选记录，并显示失败原因与跳过数量。
-- **Cookie 导出（三选一，导出即出库）**：
-  - **Cookie 字符串**：`k=v; k=v; ...`（单账号 `.txt`，多账号打包 `.zip`）
-  - **Cookie JSON 对象**：单个 Adobe 的 Cookie 对象（含 `cookie_string` / `cookies_map` / 带元数据的 `cookies` / `storage`；单账号 `.json`，多账号 `.zip`）
-  - **Cookie 数组（多 Adobe 批量）**：所选账号合并为单个 `.json` 数组
-- **安全**：列表接口不返回 `auth_data`（`json:"-"`），日志与截图不含验证码或 Cookie 明文；Cookie 仅通过上述导出接口、且仅对已注册记录开放。
-- **浏览器模式**：页面提供“无头浏览器模式”开关，默认开启，保存后对新任务生效，重启后保留。
-- **失败重试与已有账号**：操作列使用文字按钮；失败记录可原地重新注册，保留密码、资料和历史日志。Adobe 提示邮箱已存在时显示“已注册”，在独立“信息”列说明已停止处理，不再登录、收码或采集会话；这类记录不会进入手动或自动重试。状态与错误原因/备注分别放在“状态”和“信息”列。
-- **注册资料**：出生年月默认随机取 1990–1999 年和 1–12 月，地区默认新加坡（SG）；资料写入记录，重试时复用。
-- **相关设置键**：`adobe_headless`（缺省/`1` 开启，`0` 关闭）、`adobe_first_name`、`adobe_last_name`、`adobe_country_code`（新记录的资料默认值）；并发跟全局 `max_concurrency`，代理跟全局 `proxy_enabled` / `proxy_list`。
-
----
-
-## ⚙️ 使用指南
-
-### 第一步：导入邮箱
-
-进入「邮箱管理」，支持两种方式导入：
-
-- **手动添加**：填写邮箱地址、密码、服务商
-- **批量导入**：点击「批量导入邮箱」，粘贴内容或拖入 TXT / CSV / TSV / JSON 文件。常见格式：
-  ```
-  email----password----client_id----refresh_token
-  email|password|refresh_token|client_id|recovery_email
-  ```
-  自动识别 `----`、`---`、Tab、竖线、中英文逗号/分号、空格及 `邮箱:密码`；通过 UUID 和令牌特征识别 `client_id` / `refresh_token` 的顺序。也支持带中英文表头的 CSV/TSV、JSON 对象/数组/JSONL、`email=... password=...` 单行键值和多行键值块。辅助邮箱、备注及多余字段会保存在备注中；无法识别的记录显示原因，重复邮箱自动跳过。
-
-  五段竖线格式的最后一段也可以是 `用户名@` 等不完整邮箱或附加信息，按备注保存。兼容聊天复制带来的邮箱 `\@` / `\_` 和 Microsoft 刷新令牌 `\_` 转义，密码保持原样。
-
-  `Graph API` 标识和 Outlook 竖线 OAuth 数据包会自动识别；显式要求 Graph 的记录必须包含 `client_id` 和 `refresh_token`。仅密码格式可导入保存，但当前收件认证仍需 OAuth 凭据。
-
-> Outlook 邮箱需额外填写 `client_id` 和 `refresh_token`。系统优先按 Microsoft Graph `.default` 刷新令牌；旧式令牌不接受该 scope（`AADSTS90023`）时自动按原授权刷新，并通过 Outlook IMAP XOAUTH2 收件，无需手动选择协议。
-
----
-
-### 第二步：配置系统设置
-
-进入「系统设置」，配置以下参数后保存：
-
-| 参数 | 说明 | 建议值 |
-|------|------|--------|
-| 并发数 | 同时注册的账号数量 | 3 ~ 5 |
-| 裂变数量 | 每个邮箱注册的子号数 | 5（即 1母 + 5子 = 6个账号）；`+别名` 子号与母号天然可被关联，追求存活率时建议调低甚至设为 0 |
-| 无头模式 | 是否隐藏浏览器窗口 | 生产环境建议开启 |
-| 代理池 | 每行一个代理，格式见下方 | 建议动态住宅代理，每号独立出口 |
-| GPT 注册引擎 | `protocol` 纯协议（默认）/ `browser` 浏览器自动化（`chatgpt_engine`） | protocol |
-| GPT 注册后预热对话 | 注册成功后先发一条普通对话再取 token（`chatgpt_warmup`，仅浏览器引擎生效） | 开启 |
-| GPT 注册浏览器 | 留空优先本机 Chrome；`rod` 用内置 Chromium；或填路径（`chatgpt_browser_bin`） | 留空 |
-| GPT 共享浏览器进程池 | 多账号共用 Chrome 进程、独立上下文（`chatgpt_browser_pool`） | 开启 |
-| 每进程账号数 | 一个 Chrome 进程同时承载的账号数（`chatgpt_contexts_per_host`） | 4；16 核 16G 机器并发 8 时可设 4~8 |
-
-**代理格式：**
-```
-http://user:pass@ip:port
-socks5://user:pass@ip:port
-http://ip:port
+```text
+email----password----client_id----refresh_token
 ```
 
----
+认证失败时可查看原因并重新认证；具体收件能力取决于邮箱配置和授权范围。
 
-### 第三步：启动批量生产
+### 任务管理
 
-1. 进入「仪表盘」，点击右上角「**空跑**」按钮先测试环境
-2. 点击「**生产**」，输入目标账号数量
-3. 系统自动调度：优先注册母号 → 母号成功后裂变子号 → 失败自动补单直到达标
-4. 实时查看成功数 / 失败数 / 进度条
+在对应平台注册页面创建任务，查看进度、日志及失败截图。可用的重试、停止、测活等操作会随记录状态变化。
 
----
+Adobe 页面的批量选择限定于当前可见页；翻页或筛选后，隐藏记录会从选择中移除。无头浏览器开关会保存设置，并对新启动的任务生效。
 
-### 查看注册详情
+### Adobe 导出
 
-- 进入「GPT 注册」点击任意账号可查看**实时执行日志**（步骤级别，精确到秒）
-- 点击「截图」可查看注册过程中的**浏览器截图**，方便排查失败原因
-- 支持按状态筛选：待注册 / 注册中 / 已注册 / 注册失败
-- 支持导出 ChatGPT 网页 Cookie 会话、Sub2API 聚合 JSON，或 CLIProxyAPI（CPA）auth-dir 格式；网页会话和 CPA 多账号导出均为 ZIP
+| 操作 | 文件内容 | 条件与出库行为 |
+| --- | --- | --- |
+| 导出 Cookie 字符串 | 单条为 TXT，多条为 ZIP | 仅导出符合条件的已注册会话；导出后标记已出库 |
+| 导出 Cookie JSON | 单条为 JSON，多条为 ZIP | 仅导出符合条件的已注册会话；导出后标记已出库 |
+| 导出 Cookie 数组 | 单个 JSON 数组文件 | 仅导出符合条件的已注册会话；导出后标记已出库 |
+| 导出账号（仅邮箱） | TXT，每行一个邮箱，自动去重 | 导出当前勾选记录的邮箱，不限注册状态，不改变出库状态 |
 
----
+“导出未出库”用于导出全部符合条件的已注册、未出库账号，不需要先勾选。
 
-## ❓ 常见问题
+GPT 页面另外提供网页会话、Sub2API 和 CPA 格式导出。
 
-**Q：浏览器第一次启动很慢？**
-> A：首次运行会自动下载 Chromium（约 150MB），下载完成后后续启动秒开。
+### 测活与恢复会话
 
-**Q：注册失败怎么办？**
-> A：系统会自动重试补单，无需手动干预。查看执行日志可定位具体失败原因（如验证码超时、IP 被封等）。
+Adobe 测活会检查已保存的 Cookie 是否能换取访问令牌：
 
-**Q：不配置代理可以用吗？**
-> A：可以，留空即直连。但大量并发注册建议配置代理池，避免 IP 被限流。
+- **有效**：能够获取访问令牌。
+- **失效**：请求被上游明确拒绝。
+- **未知**：网络异常、限流、服务异常或缺少可用 Cookie 等情况，无法确定状态。
 
-**Q：能不能做成纯协议注册（不开浏览器）？**
-> A：**ChatGPT 注册默认已是纯协议**（设置项 `chatgpt_engine`，默认 `protocol`）。我们用 Chrome 146 的 TLS/HTTP2 指纹（bogdanfinn tls-client）直连 `chatgpt.com` / `auth.openai.com` 走完整个注册流程：CSRF → authorize → 邮箱 OTP → create_account → callback → `/api/auth/session` 取 access token → 保存 ChatGPT/OpenAI 域完整 Cookie。整条链路不启动任何浏览器，单号约 15~20 秒。
->
-> 截至 2026-09 实测：服务端**不强制** OpenAI Sentinel 头（VM 指纹 + PoW + Turnstile），Cloudflare 只校验 TLS/HTTP2 指纹与 UA/Client Hints 自洽——Chrome 131 指纹会被 CF 拦截（`cf-mitigated: challenge`），Chrome 133/146 直接放行。如果哪天 OpenAI 开始强制 Sentinel，把 `chatgpt_engine` 切到 `browser` 即可回退到真实 Chrome + 共享进程池的旧路径。
+“批量救回失效号”会处理全部已注册、标记为失效且保存了会话数据的记录，不限于当前勾选项。它尝试恢复登录会话、完成邮箱验证、重新保存会话并复检。该操作不能保证恢复成功；“失效”也不等同于账号被封。
 
-**Q：注册出来的号一用（生图）就被封 / 还没用就死了？**
-> A：封号几乎都是"关联"问题，而不是单个号的行为。请逐项对照：
-> 1. **注册指纹**：默认协议引擎用 Chrome 146 TLS/HTTP2 指纹 + 对应 UA/Client Hints；切到浏览器引擎时才是本机真实 Chrome + 真人输入事件。
-> 2. **测活**：旧版测活用无 Cookie 的新浏览器请求 `/backend-api/me`，会制造假 401；本版本恢复账号 Cookie、注册 UA、屏幕、时区和原粘性代理 session，并由网页自身验证 `/api/auth/session`。
-> 3. **用号方式**：`auth_data` 里带有注册时的 `user_agent` / `screen` / `registered_ip` / `registered_country` / `registered_timezone` / `proxy`。下游网关应沿用同一地区和代理线路，不要用一台服务器的固定 IP 集中调用大量账号。
-> 4. **裂变子号**：`a+001@…`、`a+002@…` 与母号是同一个邮箱，OpenAI 一眼就能关联；母号被封时子号大概率跟着走。看重存活率就把裂变数量调低。
-> 5. **节奏**：免费号有很低的生图配额，新号第一天就高频生图会立刻触发风控；建议养号（先正常聊几轮）、分散使用时间、单号限速。
+## 数据与重启
 
-**Q：账号导出格式是什么？**
-> A：在「GPT 注册」勾选账号后可选择“导出网页会话”“导出 Sub2API”或“导出 CPA”。网页会话包含可恢复到 `chatgpt.com` 的 Cookie、Cookie Header、注册 UA、屏幕、时区和代理信息；单账号为 JSON，多账号为 ZIP。2026-09-06 以前的旧记录只保存了 access token，没有 Cookie，需重新登录或重新注册才能恢复网页会话。用于网页生图时请使用网页会话导出，并恢复结构化 Cookie 与注册现场，不要把 access token 直接请求 `api.openai.com/v1`。
+数据库文件 `adskull.db` 位于程序启动时的工作目录，保存账号、邮箱、配置、任务记录和会话数据。切换工作目录可能导致程序创建或使用另一份数据库。
 
----
+备份时先停止服务，再复制数据库；确认服务已正常退出后再操作 SQLite 的附属文件。恢复时将备份放回相同工作目录。
 
-## ⭐ 如果觉得好用，欢迎 Star！
+重启会中断内存中的任务与批量调度。启动时，程序会将遗留的“注册中”记录回收为失败状态；重启后应检查任务状态，按需重新发起操作。
+
+## 项目结构
+
+```text
+chatgpt-register/
+├── main.go                  # 程序入口与 API 路由
+├── static_server.go         # 静态文件服务与前端热更新
+├── static_server_test.go    # 静态文件服务测试
+├── go.mod / go.sum          # Go 依赖
+├── internal/
+│   ├── auth/                # 管理员登录与会话鉴权
+│   ├── db/                  # 数据库初始化
+│   ├── models/              # 数据模型
+│   ├── handlers/            # HTTP 接口
+│   ├── browserboot/         # 浏览器准备与状态
+│   ├── mailfetch/           # 邮件读取
+│   ├── mailverify/          # 邮箱认证
+│   ├── livecheck/           # 会话可用性检查
+│   └── …                    # 各平台任务流程与调度
+├── static/                  # 前端页面、样式与脚本
+├── scripts/                 # 辅助脚本与前端检查
+└── .local/                  # 本地构建与运行文件
+```
+
+## 开发检查
+
+运行 Go 测试：
+
+```bash
+go test ./...
+```
+
+运行现有前端检查：
+
+```bash
+node --test scripts/adobe-ui.test.cjs scripts/mailbox-import.test.cjs
+```
+
+## 常见问题
+
+**页面打不开**
+
+检查进程是否仍在运行、启动日志是否报错，以及 `ADDR` 指定的端口是否被占用。
+
+**修改页面后没有更新**
+
+确认正在运行包含热更新功能的新版本，启动目录包含 `go.mod` 和 `static/`，且没有设置 `STATIC_MODE=embedded`。旧页面需手动刷新一次才能加载热更新脚本。
+
+**浏览器任务无法启动**
+
+查看页面中的浏览器准备状态与服务日志。首次下载未完成或下载失败时，相关操作可能暂不可用。
+
+**导出按钮不可用**
+
+Cookie 导出需要符合条件的已注册会话。仅邮箱导出只要求当前选中的记录包含邮箱。
+
+**重启后数据不见了**
+
+先检查启动时的工作目录，确认程序正在使用原有的 `adskull.db`。

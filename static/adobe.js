@@ -51,6 +51,7 @@ function canAdobeAction(x, action) {
   const session = x.status === 'registered' && x.has_auth;
   if (action === 'retry') return browserReady && x.can_retry;
   if (action === 'session') return !!session;
+  if (action === 'email') return !!String(x.email || '').trim();
   if (action === 'rescue') return browserReady && session && x.alive === 'dead';
   if (action === 'stop') return ['registering', 'waiting_code'].includes(x.status);
   if (action === 'code') return x.status === 'waiting_code';
@@ -58,7 +59,8 @@ function canAdobeAction(x, action) {
 }
 const ACTION_REASON = {
   retry: '仅待注册或注册失败且没有会话的账号可重试；需浏览器就绪',
-  session: '注册成功并保存会话后才可测活或导出',
+  session: '注册成功并保存会话后才可测活或导出 Cookie',
+  email: '请先选择有邮箱的账号',
   rescue: '仅已注册、测活失效且有会话的账号可救回；需浏览器就绪',
   stop: '仅正在注册或等待验证码的任务可停止',
   code: '仅等待验证码时可提交',
@@ -115,8 +117,8 @@ function rowHtml(x) {
         ${x.status === 'waiting_code' ? `<button class="px-btn" ${actionAttrs(x, 'code', '输入验证码')} onclick="openCodeModal(${x.id})">输入验证码</button>` : ''}
         <button class="px-btn" ${actionAttrs(x, 'session', '检测存活')} onclick="liveCheckOne(${x.id})">检测存活</button>
         ${x.status === 'registered' && x.alive === 'dead' ? `<button class="px-btn" ${actionAttrs(x, 'rescue', '恢复会话')} onclick="rescueOne(${x.id})">恢复会话</button>` : ''}
-        <button class="px-btn" ${actionAttrs(x, 'session', '导出 Cookie')} onclick="downloadAdobe(${x.id}, 'string')">导出 Cookie</button>
-        <button class="px-btn" ${actionAttrs(x, 'session', '导出 JSON')} onclick="downloadAdobe(${x.id}, 'json')">导出 JSON</button>
+        <button class="px-btn adobe-export adobe-export-string" ${actionAttrs(x, 'session', '导出 Cookie')} onclick="downloadAdobe(${x.id}, 'string')">导出 Cookie</button>
+        <button class="px-btn adobe-export adobe-export-json" ${actionAttrs(x, 'session', '导出 JSON')} onclick="downloadAdobe(${x.id}, 'json')">导出 JSON</button>
         <button class="px-btn danger" ${actionAttrs(x, 'delete', '删除记录')} onclick="del(${x.id})">删除记录</button>
       </div>
       </td>
@@ -273,12 +275,12 @@ function syncBatchBar() {
       : [...adobeSelected].some(id => canAdobeAction(adobeCache[id], action));
     button.disabled = actionBusy || !eligible;
     if (!eligible) button.title = (button.dataset.label ? button.dataset.label + '：' : '') + (ACTION_REASON[action] || '请先选择账号');
-    else button.title = button.dataset.id ? button.dataset.label : '仅处理所选符合条件的账号';
+    else button.title = action === 'email' ? '导出所选邮箱，每行一个；不改变出库状态' : (button.dataset.id ? button.dataset.label : '仅处理所选符合条件的账号');
   });
   const help = document.getElementById('adobe-batch-help');
   if (help) {
     const n = action => [...adobeSelected].filter(id => canAdobeAction(adobeCache[id], action)).length;
-    help.textContent = `可重试 ${n('retry')} 项 · 可测活/导出 ${n('session')} 项 · 可救回 ${n('rescue')} 项。批量操作仅处理符合条件的所选记录。`;
+    help.textContent = `可重试 ${n('retry')} 项 · 可测活/导出 Cookie ${n('session')} 项 · 可救回 ${n('rescue')} 项。邮箱导出包含所选各状态记录，不改变出库状态。`;
   }
   const produce = document.getElementById('produce-btn');
   if (produce) produce.disabled = actionBusy || !browserReady;
@@ -307,6 +309,21 @@ function runSelected(action, suffix, label, method = 'POST') {
     result.textContent = summary + (failures.length ? '；' + failures.join('；') : '');
     result.hidden = false;
   });
+}
+
+/* 仅导出当前页所选邮箱，不含凭据，也不改变出库状态。 */
+function downloadSelectedEmails() {
+  if (actionBusy) return;
+  const emails = [...new Set(selectedFor('email').map(id => adobeCache[id].email.trim()))];
+  if (!emails.length) return toast(ACTION_REASON.email, true);
+  const blob = new Blob([emails.join('\r\n') + '\r\n'], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = 'adobe_emails_' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('已导出 ' + emails.length + ' 个邮箱');
 }
 
 /* ===== 导出 Cookie（string 字符串 / json 对象 / array 批量数组；导出即出库） ===== */
